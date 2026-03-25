@@ -13,12 +13,13 @@ import pickle
 import os
 import torch
 from typing import List, Dict, Any, Optional, Tuple
+from config import RAG_LLM_CONFIG
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def ask_llama(prompt, model, url="http://localhost:11434/api/generate"):
+async def ask_llama(prompt, model, url=RAG_LLM_CONFIG['url']):
     """Асинхронная версия ask_llama."""
     try:
         async with aiohttp.ClientSession() as session:
@@ -39,7 +40,7 @@ async def ask_llama(prompt, model, url="http://localhost:11434/api/generate"):
         logger.error(f"Ошибка при запросе к Ollama: {e}")
         return None
 
-def ask_llama_sync(prompt, model, url="http://localhost:11434/api/generate"):
+def ask_llama_sync(prompt, model, url=RAG_LLM_CONFIG['url']):
     payload = {
         "model": model,
         "prompt": prompt,
