@@ -19,8 +19,6 @@ data/
 *.log
 .env
 *.xlsx
-*.pkl
-*.index
 /extracted_texts
 /downloaded_files
 /company_context
