@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import torch
 from typing import List, Dict, Any, Optional, Tuple
 
 # Настройка логирования
@@ -114,11 +115,22 @@ class TenderClassifierRAG:
         inverse_freq_mode: str = "log",
         llm_config: Optional[Dict] = None,  # конфигурация LLM
         company_context_dir: Optional[str] = None,
-        interest_threshold: float = 0.5     # порог для преобразования interest_score в is_interesting
+        interest_threshold: float = 0.5,     # порог для преобразования interest_score в is_interesting
+        device: str = "auto"
     ):
         """
         Инициализация: загрузка базы (из Excel или кэша), вычисление/загрузка эмбеддингов, построение индекса.
         """
+        if device == "auto":
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                dev = "mps"
+            elif torch.cuda.is_available():
+                dev = "cuda"
+            else:
+                dev = "cpu"
+        else:
+            dev = device
+        logger.info(f"Используется устройство для эмбеддингов: {dev}")
         # Поддерживаем как один путь (str), так и список путей
         if isinstance(data_path, (list, tuple)):
             self.data_paths = list(data_path)
@@ -143,7 +155,7 @@ class TenderClassifierRAG:
 
         # Инициализируем модель эмбеддингов
         logger.info("Инициализация модели эмбеддингов %s", model_name)
-        self.embedder = SentenceTransformer(model_name)
+        self.embedder = SentenceTransformer(model_name, device=dev)
 
         # Получаем эмбеддинги (с кэшированием)
         self.embeddings = self._get_embeddings()

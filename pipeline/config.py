@@ -9,8 +9,9 @@ load_dotenv(os.path.join(PIPELINE_DIR, ".env"))
 # URL для авторизации на rostender.info
 AUTH_URL = os.getenv("AUTH_URL")
 
-TENDER_URL = "https://rostender.info/region/krasnodarskij-kraj/krasnodar/90350676-tender-okazanie-uslug-po-poverke-priborov-ucheta-vodosnabjeniya-dlya-nujd-mbdou-mo-g-krasnodar-centr-detskij-sad-90?h=2389903-4fc2e6aff24ede30e8296e2c5e7a82af-1#desc"
-#
+
+TENDER_URL = "https://rostender.info/region/kirovskaya-oblast/91044786-tender-okazanie-ohrannyh-uslug"
+
 # Хранилище артефактов (json/jsonl, кеши эмбеддингов, векторные базы, отчёты).
 # По умолчанию всё складывается в `storage/` внутри проекта, но можно переопределить
 # через переменную окружения `STORAGE_ROOT`.

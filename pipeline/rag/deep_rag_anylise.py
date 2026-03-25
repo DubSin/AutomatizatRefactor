@@ -4,6 +4,7 @@ RAG-анализ документации тендеров.
 """
 import os
 import json
+import torch
 import logging
 from typing import List, Dict, Any, Optional
 from functools import lru_cache
@@ -82,10 +83,9 @@ class TenderRAGAnalyzer:
     # Кэширование модели на уровне класса
     @staticmethod
     @lru_cache(maxsize=2)
-    def _get_embedding_model(model_name: str):
-        """Загружает модель SentenceTransformer и кэширует её."""
-        logger.info(f"Загрузка модели эмбеддингов {model_name}...")
-        model = SentenceTransformer(model_name)
+    def _get_embedding_model(model_name: str, device: str):
+        logger.info(f"Загрузка модели эмбеддингов {model_name} на устройство {device}...")
+        model = SentenceTransformer(model_name, device=device)
         logger.info("Модель эмбеддингов загружена.")
         return model
 
@@ -105,7 +105,8 @@ class TenderRAGAnalyzer:
             medium_priority=MEDIUM_PRIORITY_KEYWORDS,
             low_priority=LOW_PRIORITY_KEYWORDS,
             show_progress: bool = False,  # флаг для отображения прогресс-бара
-            max_chunks: int = 500          # ограничение на количество чанков
+            max_chunks: int = 500,         # ограничение на количество чанков
+            device: str = "auto"            # устройство для эмбеддингов
     ):
         """
         Параметры:
@@ -143,8 +144,22 @@ class TenderRAGAnalyzer:
         self.show_progress = show_progress
         self.max_chunks = max_chunks
 
+        if device == "auto":
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = "mps"
+                logger.info("Используется MPS (Metal Performance Shaders)")
+            elif torch.cuda.is_available():
+                self.device = "cuda"
+                logger.info("Используется CUDA")
+            else:
+                self.device = "cpu"
+                logger.info("Используется CPU")
+        else:
+            self.device = device
+            logger.info(f"Используется явно заданное устройство: {self.device}")
+
         # Инициализация модели через кэширующий метод
-        self.embedding_model = self._get_embedding_model(embedding_model_name)
+        self.embedding_model = self._get_embedding_model(embedding_model_name, self.device)
 
         # Инициализация стеммера, если запрошено
         if self.use_stemmer:
