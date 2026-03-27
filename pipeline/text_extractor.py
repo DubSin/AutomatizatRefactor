@@ -171,7 +171,7 @@ def extract_text_from_html(html_path: str) -> str:
 # ------------------------------------------------------------
 # Основная функция извлечения текста (для одного файла)
 # ------------------------------------------------------------
-def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables: bool = False) -> str:
+def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables: bool = True) -> str:
     """
     Извлекает текст и таблицы (в Markdown) из файла.
     Возвращает содержимое, готовое для сохранения в .md.
@@ -474,7 +474,7 @@ def main():
         concurrency=20,         # увеличиваем параллелизм
         max_depth=3,
         keywords=FILES_KEYWORDS,
-        extract_tables=False    # отключаем таблицы для скорости
+        extract_tables=True
     ))
 
 if __name__ == "__main__":
