@@ -66,13 +66,7 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # Типовые вопросы (можно переопределить через конфиг)
-DEFAULT_QUESTIONS = [
-    "Дата начала срока подачи заявок?",
-    "Какие требования предъявляются к участникам?",
-    "Какие документы необходимо предоставить для участия?",
-    "Каковы условия оплаты?",
-    "Какие позиции включены в тендер (перечень товаров/работ)?"
-]
+
 
 
 class TenderRAGAnalyzer:
@@ -640,12 +634,8 @@ def build_category_questions(tender_category: Optional[str]) -> List[str]:
     """
     Формирует список вопросов для deep RAG в зависимости от категории тендера.
     """
-    base_questions = DEFAULT_QUESTIONS.copy()
-    if not tender_category or tender_category == "Не профиль":
-        return base_questions
-
     extra = CATEGORY_QUESTIONS.get(tender_category, [])
-    return base_questions + extra
+    return extra
 
 
 def analyze_tender_docs(

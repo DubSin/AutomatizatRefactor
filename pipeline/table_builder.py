@@ -291,7 +291,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     Формирует HTML-страницу с таблицей, фильтрами, счётчиком и экспортом в Excel.
     """
     # Fields to exclude from HTML display (they are still in records for filtering)
-    exclude_from_html = {'is_interesting', 'interest_score'}
+    exclude_from_html = {'is_interesting'}
     # Create a copy of fieldnames for HTML columns, excluding those
     html_fieldnames = [f for f in fieldnames if f not in exclude_from_html]
 
@@ -320,6 +320,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         'deep_rag_reasoning': 'Deep RAG: Пояснение',
         'deep_rag_answers': 'Deep RAG: Ответы на вопросы',
         'interest_reasoning': 'Пояснение интереса',
+        'interest_score': 'Оценка интереса',
     }
     headers_ru = [header_names.get(k, k.replace('_', ' ').title()) for k in html_fieldnames]
 
@@ -880,57 +881,44 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Сводная таблица тендеров</title>
     <style>
+        /* --- ОБЩАЯ ВЁРСТКА --- */
+        html, body {{
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }}
         body {{
+            display: flex;
+            flex-direction: column;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 20px;
             background-color: #f5f5f5;
         }}
         h1 {{
             color: #333;
             text-align: center;
-            margin-bottom: 30px;
+            margin: 20px 20px 0 20px;
         }}
         .filters {{
             background: white;
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }}
-        .filter-btn {{
-            background-color: #e0e0e0;
-            border: none;
-            padding: 6px 12px;
-            margin: 0 5px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: all 0.2s;
-        }}
-        .filter-btn.active {{
-            background-color: #2c3e50;
-            color: white;
-        }}
-        .filter-btn:hover {{
-            background-color: #bdc3c7;
-        }}
-        select {{
-            padding: 6px 12px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-            font-size: 14px;
+            margin: 20px;
+            flex-shrink: 0;  /* не сжимается */
         }}
         .table-container {{
-            overflow-x: auto;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            flex: 1;                  /* занимает всё оставшееся пространство */
+            overflow-x: auto;         /* горизонтальная прокрутка здесь */
+            margin: 0 20px 20px 20px;
             border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             background-color: white;
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
-            min-width: 1200px;
             font-size: 14px;
+            min-width: 1200px;       /* если нужно, можно убрать или оставить */
         }}
         th {{
             background-color: #2c3e50;
@@ -990,12 +978,13 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             white-space: nowrap;
         }}
         .footer {{
-            margin-top: 20px;
+            flex-shrink: 0;           /* не сжимается */
             padding: 15px;
             text-align: right;
             color: #555;
             font-size: 0.9em;
             background-color: white;
+            margin: 0 20px 20px 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
@@ -1006,6 +995,30 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             max-width: 300px;
             word-break: break-word;
         }}
+        /* Кнопки фильтров (оставляем как есть) */
+        .filter-btn {{
+            background-color: #e0e0e0;
+            border: none;
+            padding: 6px 12px;
+            margin: 0 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }}
+        .filter-btn.active {{
+            background-color: #2c3e50;
+            color: white;
+        }}
+        .filter-btn:hover {{
+            background-color: #bdc3c7;
+        }}
+        select {{
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-size: 14px;
+        }}
     </style>
 </head>
 <body>
@@ -1014,11 +1027,12 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     <div class="table-container">
         <table id="dataTable">
             <thead>
-                <tr>{headers_html}
+                <tr>{headers_html}</tr>
             </thead>
             <tbody>
                 {''.join(rows_html)}
             </tbody>
+        </table>
     </div>
     <div class="footer">
         <span>📅 Сгенерировано {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')} | </span>
@@ -1036,11 +1050,11 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_html = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.html")
-    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260323_143433.jsonl")
+    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260326_004152.jsonl")
     
     # Также генерируем Excel файл
     output_excel = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.xlsx")
-    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260323_143433.jsonl")
+    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260326_004152.jsonl")
 
     print(f"HTML таблица сгенерирована: {output_html}")
     print(f"Excel таблица сгенерирована: {output_excel}")

@@ -2,126 +2,37 @@ import os
 import re
 import logging
 import asyncio
-import zipfile
+import time
 from typing import List, Optional
 from docx import Document
 import pandas as pd
-import pdfplumber
+import pdfplumber  # оставлен для таблиц
+import fitz  # PyMuPDF для быстрого текста
 from bs4 import BeautifulSoup
-from config import MAX_PDF_PAGES, MAX_DOCX_PARAGRAPHS, MAX_CONCURRENT_EXTRACT, PROCESS_DOC
+from config import MAX_PDF_PAGES, MAX_DOCX_PARAGRAPHS, MAX_CONCURRENT_EXTRACT, PROCESS_DOC, MAX_DEPTH
 
-# Попытка импорта rarfile для работы с RAR-архивами
 try:
-    import rarfile
-    RARFILE_AVAILABLE = True
+    from config import FILES_KEYWORDS
 except ImportError:
-    rarfile = None
-    RARFILE_AVAILABLE = False
-    # logger будет определён позже, поэтому пока просто заглушка
-    pass
+    FILES_KEYWORDS = []
 
 logger = logging.getLogger(__name__)
 
-# Поддерживаемые расширения (добавлен .rar)
+# Поддерживаемые расширения (без архивов)
 SUPPORTED_EXTENSIONS = (
-    ".pdf", ".docx", ".txt", ".json", ".xlsx", ".xls", ".html", ".rar"
+    ".pdf", ".docx", ".txt", ".json", ".xlsx", ".xls", ".html"
 ) + ((".doc",) if PROCESS_DOC else ())
-
-# ------------------------------------------------------------
-# Санитизация имени файла (удаление недопустимых символов)
-# ------------------------------------------------------------
-def sanitize_filename(filename: str, replacement: str = "_") -> str:
-    """
-    Заменяет в имени файла символы, недопустимые в файловых системах, на replacement.
-    Также удаляет управляющие символы и обрезает лишние пробелы в конце.
-    """
-    illegal_chars = r'[\\/*?:"<>|\x00-\x1f]'
-    sanitized = re.sub(illegal_chars, replacement, filename)
-    sanitized = sanitized.rstrip('. ')
-    if not sanitized:
-        sanitized = "unnamed" + replacement
-    return sanitized
-
-def rename_files_in_folder(folder_path: str, dry_run: bool = False) -> List[tuple]:
-    """
-    Рекурсивно обходит папку и переименовывает все файлы и папки,
-    применяя sanitize_filename к их именам. Если dry_run=True, только возвращает список
-    предполагаемых изменений, не переименовывая.
-    Возвращает список кортежей (old_path, new_path).
-    """
-    changes = []
-    for root, dirs, files in os.walk(folder_path, topdown=False):
-        # Сначала файлы
-        for name in files:
-            old_path = os.path.join(root, name)
-            new_name = sanitize_filename(name)
-            if new_name == name:
-                continue
-            new_path = os.path.join(root, new_name)
-            counter = 1
-            base, ext = os.path.splitext(new_name)
-            while os.path.exists(new_path):
-                new_path = os.path.join(root, f"{base}_{counter}{ext}")
-                counter += 1
-            changes.append((old_path, new_path))
-            if not dry_run:
-                os.rename(old_path, new_path)
-                logger.info("Переименован файл: %s -> %s", old_path, new_path)
-
-        # Затем папки
-        for name in dirs:
-            old_path = os.path.join(root, name)
-            new_name = sanitize_filename(name)
-            if new_name == name:
-                continue
-            new_path = os.path.join(root, new_name)
-            counter = 1
-            base = new_name
-            while os.path.exists(new_path):
-                new_path = os.path.join(root, f"{base}_{counter}")
-                counter += 1
-            changes.append((old_path, new_path))
-            if not dry_run:
-                os.rename(old_path, new_path)
-                logger.info("Переименована папка: %s -> %s", old_path, new_path)
-    return changes
 
 # ------------------------------------------------------------
 # Проверка валидности DOCX
 # ------------------------------------------------------------
 def is_valid_docx(file_path: str) -> bool:
     """Проверяет, является ли файл корректным ZIP-архивом с [Content_Types].xml."""
+    import zipfile
     try:
         with zipfile.ZipFile(file_path, 'r') as zf:
             return '[Content_Types].xml' in zf.namelist()
     except zipfile.BadZipFile:
-        return False
-
-# ------------------------------------------------------------
-# Работа с архивами (RAR)
-# ------------------------------------------------------------
-def is_archive(file_path: str) -> bool:
-    """Проверяет, является ли файл архивом (по расширению)."""
-    ext = os.path.splitext(file_path)[1].lower()
-    return ext == '.rar'
-
-def extract_rar(rar_path: str, extract_to: str) -> bool:
-    """
-    Извлекает RAR-архив в указанную папку.
-    Возвращает True в случае успеха, False при ошибке или отсутствии поддержки.
-    """
-    if not RARFILE_AVAILABLE:
-        logger.warning("rarfile не доступен, пропускаем извлечение %s", rar_path)
-        return False
-
-    try:
-        os.makedirs(extract_to, exist_ok=True)
-        with rarfile.RarFile(rar_path) as rf:
-            rf.extractall(extract_to)
-        logger.info("Распакован RAR: %s -> %s", rar_path, extract_to)
-        return True
-    except Exception as e:
-        logger.error("Ошибка при извлечении RAR %s: %s", rar_path, e)
         return False
 
 # ------------------------------------------------------------
@@ -191,7 +102,7 @@ def table_to_markdown(table_data) -> str:
         return ""
 
 # ------------------------------------------------------------
-# Извлечение таблиц из разных форматов
+# Извлечение таблиц из PDF (оставлен pdfplumber, опционально)
 # ------------------------------------------------------------
 def extract_tables_from_pdf(pdf_path: str, max_pages: Optional[int] = None) -> List[str]:
     """Извлекает таблицы из PDF с помощью pdfplumber и возвращает список Markdown-строк."""
@@ -260,10 +171,13 @@ def extract_text_from_html(html_path: str) -> str:
 # ------------------------------------------------------------
 # Основная функция извлечения текста (для одного файла)
 # ------------------------------------------------------------
-def extract_text(file_path: str, max_pages: Optional[int] = None) -> str:
+def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables: bool = False) -> str:
     """
     Извлекает текст и таблицы (в Markdown) из файла.
     Возвращает содержимое, готовое для сохранения в .md.
+
+    Параметры:
+        extract_tables: извлекать ли таблицы из PDF (медленно, по умолчанию False)
     """
     if not os.path.isfile(file_path):
         logger.error(f"Файл не найден: {file_path}")
@@ -295,29 +209,33 @@ def extract_text(file_path: str, max_pages: Optional[int] = None) -> str:
     if ext in ('.html', '.htm'):
         return extract_text_from_html(file_path)
 
-    # PDF
+    # PDF – теперь с PyMuPDF (быстро)
     if ext == '.pdf':
         pages_limit = max_pages if max_pages is not None else MAX_PDF_PAGES
         full_text = ""
 
-        # 1. Извлекаем текст через pdfplumber с учётом макета страниц
+        # 1. Извлекаем текст через PyMuPDF
         try:
-            with pdfplumber.open(file_path) as pdf:
-                for page_num, page in enumerate(pdf.pages):
-                    if pages_limit and page_num >= pages_limit:
-                        break
-                    page_text = page.extract_text(layout=True) or page.extract_text() or ""
-                    if page_text.strip():
-                        full_text += f"\n\n## Страница {page_num + 1}\n\n"
-                        full_text += page_text + "\n"
+            doc = fitz.open(file_path)
+            # Если pages_limit задан, ограничиваем число страниц
+            total_pages = len(doc)
+            pages_to_read = min(total_pages, pages_limit) if pages_limit else total_pages
+            for page_num in range(pages_to_read):
+                page = doc[page_num]
+                text = page.get_text("text")  # быстрый метод, без layout
+                if text.strip():
+                    full_text += f"\n\n## Страница {page_num + 1}\n\n"
+                    full_text += text + "\n"
+            doc.close()
         except Exception as e:
             logger.exception(f"Ошибка при чтении текста из PDF {file_path}: {e}")
 
-        # 2. Извлекаем таблицы через pdfplumber
-        tables_md = extract_tables_from_pdf(file_path, max_pages=pages_limit)
-        if tables_md:
-            full_text += "\n\n## Извлечённые таблицы\n\n"
-            full_text += "\n".join(tables_md)
+        # 2. Извлекаем таблицы, если нужно (опционально, медленно)
+        if extract_tables:
+            tables_md = extract_tables_from_pdf(file_path, max_pages=pages_limit)
+            if tables_md:
+                full_text += "\n\n## Извлечённые таблицы\n\n"
+                full_text += "\n".join(tables_md)
 
         return clean_text(full_text, preserve_structure=True)
 
@@ -396,11 +314,6 @@ def extract_text(file_path: str, max_pages: Optional[int] = None) -> str:
             logger.exception(f"Ошибка при чтении DOC {file_path}: {e}")
             raise
 
-    # Если файл .rar (архив) – не обрабатываем как текст, а только как архив
-    if ext == '.rar':
-        logger.warning("extract_text вызван для архива %s, но архивы обрабатываются отдельно. Возвращаем пустую строку.", file_path)
-        return ""
-
     raise ValueError(f"Неподдерживаемый формат файла: {ext}")
 
 def _extract_doc_via_word(file_path):
@@ -432,125 +345,137 @@ def _extract_doc_via_word(file_path):
 # ------------------------------------------------------------
 # Асинхронная обёртка
 # ------------------------------------------------------------
-async def extract_text_async(file_path, max_pages=None):
-    return await asyncio.to_thread(extract_text, file_path, max_pages)
+async def extract_text_async(file_path, max_pages=None, extract_tables=False):
+    return await asyncio.to_thread(extract_text, file_path, max_pages, extract_tables)
 
 # ------------------------------------------------------------
-# Пакетная обработка папки (process_folder) с поддержкой архивов
+# Основная функция: конвертация папки с сохранением структуры
 # ------------------------------------------------------------
-async def process_folder(input_folder, output_folder, max_pages=None, concurrency=None,
-                         sanitize_first=False, extract_archives=True):
+async def process_folder(
+    input_folder: str,
+    output_folder: str,
+    max_pages: Optional[int] = None,
+    concurrency: Optional[int] = None,
+    max_depth: Optional[int] = MAX_DEPTH,
+    keywords: Optional[List[str]] = FILES_KEYWORDS,
+    extract_tables: bool = False
+) -> List[str]:
     """
     Обходит папку input_folder, извлекает текст из всех поддерживаемых файлов
-    и сохраняет результат в output_folder с расширением .md.
+    и сохраняет результат в output_folder с расширением .md, сохраняя структуру каталогов.
     В начало каждого файла добавляется заголовок с именем исходного файла.
 
-    Если sanitize_first=True, то перед обработкой переименовывает все файлы и папки,
-    удаляя недопустимые символы из имён.
-
-    Если extract_archives=True, то файлы с расширениями архивов (.rar) будут
-    распакованы в подпапку рядом с архивом, а затем содержимое будет обработано рекурсивно.
+    Аргументы:
+        input_folder (str): путь к исходной папке (уже разархивированной)
+        output_folder (str): путь к папке, куда будут сохранены .md файлы
+        max_pages (int, optional): максимальное количество страниц для PDF
+        concurrency (int, optional): количество параллельных задач (по умолчанию из конфига)
+        max_depth (int, optional): максимальная глубина вложенности (0 - только корень)
+        keywords (List[str], optional): список ключевых слов для фильтрации по имени файла.
+                                        Если список пуст или None, фильтрация отключена.
+        extract_tables (bool): извлекать ли таблицы из PDF (медленно, по умолчанию False)
     """
     input_folder = os.path.abspath(input_folder)
     output_folder = os.path.abspath(output_folder)
 
-    if sanitize_first:
-        logger.info("Запуск санитизации имён файлов в %s", input_folder)
-        changes = rename_files_in_folder(input_folder, dry_run=False)
-        logger.info("Переименовано %s элементов.", len(changes))
-
-    created = []
-
     if concurrency is None:
         concurrency = MAX_CONCURRENT_EXTRACT
+
+    # Собираем список всех файлов, которые будем обрабатывать
+    all_files = []
+    for root, _, files in os.walk(input_folder):
+        # Вычисляем глубину root относительно input_folder
+        rel_root = os.path.relpath(root, input_folder)
+        if rel_root == '.':
+            depth = 0
+        else:
+            depth = rel_root.count(os.sep) + 1
+
+        if max_depth is not None and depth > max_depth:
+            continue   # пропускаем каталоги глубже max_depth
+
+        for name in files:
+            _, ext = os.path.splitext(name)
+            if ext.lower() in SUPPORTED_EXTENSIONS:
+                all_files.append(os.path.join(root, name))
+
+    total_files = len(all_files)
+    logger.info("Найдено поддерживаемых файлов: %s", total_files)
+
     sem = asyncio.Semaphore(concurrency)
+    created_files = []
+    processed_count = 0
+    lock = asyncio.Lock()
 
-    def _extract_and_write(src_path, out_path):
-        """Извлекает текст и сохраняет в .md с заголовком."""
-        filename = os.path.basename(src_path)
-        header = f"# Файл: {filename}\n\n"
-        text = extract_text(src_path, max_pages)
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(header + text)
-        return out_path
-
-    async def _handle_file(src_path, out_path):
+    async def _handle_file(src_path: str, out_path: str, file_idx: int):
+        nonlocal processed_count
+        start_time = time.time()
+        logger.info("[%d/%d] Начало обработки: %s", file_idx + 1, total_files, src_path)
         async with sem:
             try:
-                saved_path = await asyncio.to_thread(_extract_and_write, src_path, out_path)
-                created.append(saved_path)
-                logger.debug("Сохранён файл: %s", saved_path)
+                # Фильтрация по ключевым словам в имени файла
+                if keywords:
+                    filename = os.path.basename(src_path)
+                    name_without_ext = os.path.splitext(filename)[0]
+                    name_lower = name_without_ext.lower()
+                    if not any(kw.lower() in name_lower for kw in keywords):
+                        logger.info("[%d/%d] Имя файла не содержит ключевых слов, пропущен: %s",
+                                    file_idx + 1, total_files, src_path)
+                        return
+
+                # Извлечение текста (только если прошёл фильтр)
+                text = await asyncio.to_thread(extract_text, src_path, max_pages, extract_tables)
+
+                # Сохраняем результат
+                filename = os.path.basename(src_path)
+                header = f"# Файл: {filename}\n\n"
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(header + text)
+
+                async with lock:
+                    created_files.append(out_path)
+                    processed_count += 1
+                elapsed = time.time() - start_time
+                logger.info("[%d/%d] Успешно обработан: %s (время: %.2f сек)",
+                            processed_count, total_files, src_path, elapsed)
             except Exception as e:
-                logger.exception("Ошибка обработки %s: %s", src_path, e)
+                elapsed = time.time() - start_time
+                logger.exception("[%d/%d] Ошибка обработки %s (время: %.2f сек): %s",
+                                 file_idx + 1, total_files, src_path, elapsed, e)
 
-    async def _handle_archive(archive_path):
-        """Распаковывает архив и рекурсивно обрабатывает его содержимое."""
-        archive_dir = os.path.dirname(archive_path)
-        archive_basename = os.path.basename(archive_path)
-        name_without_ext = os.path.splitext(archive_basename)[0]
-        extract_to = os.path.join(archive_dir, name_without_ext)
-
-        # Если папка уже существует, считаем, что архив уже распакован (пропускаем повторное извлечение)
-        if os.path.exists(extract_to):
-            logger.info("Папка %s уже существует, предполагаем, что архив %s уже распакован.", extract_to, archive_path)
-        else:
-            logger.info("Распаковка архива %s в %s", archive_path, extract_to)
-            success = await asyncio.to_thread(extract_rar, archive_path, extract_to)
-            if not success:
-                logger.error("Не удалось распаковать архив %s", archive_path)
-                return
-
-        # Рекурсивно обрабатываем извлечённую папку с теми же параметрами
-        await process_folder(
-            extract_to,
-            output_folder,
-            max_pages=max_pages,
-            concurrency=concurrency,
-            sanitize_first=False,       # санитизация уже выполнена на верхнем уровне
-            extract_archives=extract_archives
-        )
-
-    # Собираем задачи для обычных файлов и для архивов
     tasks = []
-    archive_tasks = []
+    for idx, src_path in enumerate(all_files):
+        name = os.path.basename(src_path)
+        root = os.path.dirname(src_path)
+        rel = os.path.relpath(root, input_folder)
+        out_dir = output_folder if rel == "." else os.path.join(output_folder, rel)
+        os.makedirs(out_dir, exist_ok=True)
 
-    for root, _dirs, files in os.walk(input_folder):
-        for name in files:
-            base, ext = os.path.splitext(name)
-            ext_lower = ext.lower()
-            src_path = os.path.join(root, name)
+        base = os.path.splitext(name)[0]
+        out_path = os.path.join(out_dir, base + ".md")
+        tasks.append(asyncio.create_task(_handle_file(src_path, out_path, idx)))
 
-            # Если это архив и включена распаковка — обрабатываем отдельно
-            if extract_archives and ext_lower == '.rar':
-                archive_tasks.append(asyncio.create_task(_handle_archive(src_path)))
-                continue
+    if tasks:
+        await asyncio.gather(*tasks)
 
-            # Иначе проверяем, поддерживается ли формат для прямого извлечения текста
-            if ext_lower not in SUPPORTED_EXTENSIONS or ext_lower == '.rar':
-                continue
-
-            # Выходное расширение всегда .md
-            out_ext = '.md'
-            rel = os.path.relpath(root, input_folder)
-            out_dir = output_folder if rel == "." else os.path.join(output_folder, rel)
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, base + out_ext)
-            tasks.append(asyncio.create_task(_handle_file(src_path, out_path)))
-
-    # Запускаем обработку файлов и архивов параллельно
-    if tasks or archive_tasks:
-        await asyncio.gather(*(tasks + archive_tasks))
-
-    logger.info("Обработано файлов: %s, сохранено в %s", len(created), output_folder)
-    return created
+    logger.info("Обработано файлов: %s, сохранено в %s", len(created_files), output_folder)
+    return created_files
 
 # ------------------------------------------------------------
 # Для тестирования
 # ------------------------------------------------------------
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    # Пример: обработать папку "input" и сохранить в "output_md"
-    asyncio.run(process_folder("input", "output_md", max_pages=10, sanitize_first=True, extract_archives=True))
+    # Пример использования:
+    asyncio.run(process_folder(
+        input_folder=r"F:\Python projects\Aut\storage\tenders\downloaded_files\90918705",
+        output_folder="output_md",
+        max_pages=10,           # ограничиваем страницы для ускорения
+        concurrency=20,         # увеличиваем параллелизм
+        max_depth=3,
+        keywords=FILES_KEYWORDS,
+        extract_tables=False    # отключаем таблицы для скорости
+    ))
 
 if __name__ == "__main__":
     main()

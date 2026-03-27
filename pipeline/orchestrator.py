@@ -45,7 +45,8 @@ from config import (
     COMPANY_CONTEXT_DIR,
     RAG_INTEREST_THRESHOLD,
     ANALYSIS_MODEL,
-    RAG_MODEL_NAME
+    RAG_MODEL_NAME,
+    FILES_KEYWORDS
 )
 from table_builder import generate_html_table, generate_excel_table
 from email_agent import fetch_links_from_emails, send_files_via_email
@@ -469,7 +470,7 @@ async def run_pipeline(
             await download_tender_files_async(temp_jsonl, DOWNLOAD_FOLDER, max_concurrent_files=5)
 
             # Извлечение текста из скачанных файлов – асинхронное
-            await process_folder(DOWNLOAD_FOLDER, EXTRACTED_TEXT_FOLDER, extract_archives=True)
+            await process_folder(DOWNLOAD_FOLDER, EXTRACTED_TEXT_FOLDER, keywords=FILES_KEYWORDS)
 
             # ========== БЛОК DEEP RAG ==========
             logger.info("Запуск глубокого RAG анализа для интересных тендеров...")

@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import aiofiles
 import os
+import re
 import json
 import logging
 import zipfile
@@ -13,6 +14,7 @@ from asyncio import Semaphore
 try:
     import rarfile
     RARFILE_AVAILABLE = True
+    rarfile.UNRAR_TOOL = r"C:\Program Files\WinRAR\UnRAR.exe"
 except ImportError:
     rarfile = None
     RARFILE_AVAILABLE = False
@@ -37,7 +39,8 @@ async def extract_archive_if_needed(archive_path: str):
     """
     Проверяет, является ли файл архивом, и если да, распаковывает его содержимое
     в поддиректорию с именем архива (без расширения) рядом с архивом.
-    Возвращает количество распакованных файлов или -1 в случае ошибки.
+    Рекурсивно обрабатывает вложенные архивы.
+    Возвращает общее количество распакованных файлов (включая вложенные) или -1 в случае ошибки.
     """
     ext = os.path.splitext(archive_path)[1].lower()
     if ext not in ARCHIVE_EXTS:
@@ -49,19 +52,45 @@ async def extract_archive_if_needed(archive_path: str):
     extracted_count = 0
     try:
         if ext == '.zip':
-            with zipfile.ZipFile(archive_path, 'r') as zf:
-                zf.extractall(target_dir)
-                extracted_count = len(zf.namelist())
+            # Пытаемся распаковать с указанием кодировки (Python 3.11+)
+            try:
+                with zipfile.ZipFile(archive_path, 'r', metadata_encoding='cp866') as zf:
+                    zf.extractall(target_dir)
+                    extracted_count = len(zf.namelist())
+            except TypeError:
+                # Для старых версий Python распаковываем и переименовываем файлы из cp866
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    zf.extractall(target_dir)
+                    extracted_count = len(zf.namelist())
+                    for name in zf.namelist():
+                        try:
+                            # Пробуем декодировать имя из cp866 (обычно через cp437 как промежуточный)
+                            new_name = name.encode('cp437').decode('cp866')
+                            if new_name != name:
+                                old_path = os.path.join(target_dir, name)
+                                new_path = os.path.join(target_dir, new_name)
+                                if os.path.exists(old_path):
+                                    os.rename(old_path, new_path)
+                        except:
+                            pass
             logger.debug(f"Распакован zip-архив {archive_path} -> {target_dir} ({extracted_count} файлов)")
 
         elif ext == '.rar':
             if not RARFILE_AVAILABLE:
                 logger.warning(f"rarfile не установлен, пропускаем распаковку {archive_path}")
                 return 0
+            
+            if re.search(r'\.part(?:0*[2-9]|[1-9]\d+)\.rar$', archive_path, re.IGNORECASE):
+                logger.debug(f"Пропуск тома (распаковывается вместе с первым): {archive_path}")
+                return 0
+            # Пропускаем старые форматы томов .r01, .r02...
+            if re.search(r'\.r\d{2,}$', archive_path, re.IGNORECASE):
+                return 0
+
             with rarfile.RarFile(archive_path, 'r') as rf:
                 rf.extractall(target_dir)
                 extracted_count = len(rf.namelist())
-            logger.debug(f"Распакован rar-архив {archive_path} -> {target_dir} ({extracted_count} файлов)")
+            logger.debug(f"Распакован RAR (включая все тома): {archive_path}")
 
         elif ext == '.7z':
             if not PY7ZR_AVAILABLE:
@@ -69,9 +98,20 @@ async def extract_archive_if_needed(archive_path: str):
                 return 0
             with py7zr.SevenZipFile(archive_path, mode='r') as sz:
                 sz.extractall(target_dir)
-                # py7zr не даёт простого списка файлов, оценим по количеству записей в архиве
                 extracted_count = len(sz.getnames()) if hasattr(sz, 'getnames') else 0
             logger.debug(f"Распакован 7z-архив {archive_path} -> {target_dir} ({extracted_count} файлов)")
+
+        # --- Рекурсивная обработка вложенных архивов ---
+        for root, dirs, files in os.walk(target_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext in ARCHIVE_EXTS:
+                    nested_count = await extract_archive_if_needed(file_path)
+                    if nested_count > 0:
+                        extracted_count += nested_count
+        # -------------------------------------------------
+
     except Exception as e:
         logger.error(f"Ошибка при распаковке архива {archive_path}: {e}")
         return -1
@@ -101,6 +141,7 @@ async def download_tender_files_async(
     Возвращает:
         Dict[str, Any]: статистика по скачиванию, включая список обработанных тендеров.
     """
+
     if not os.path.exists(jsonl_path):
         logger.error(f"JSONL файл не найден: {jsonl_path}")
         return {"error": "file_not_found"}
@@ -237,7 +278,9 @@ async def _download_file(
                         await f.write(chunk)
 
             # Если у файла нет расширения или оно не в списке разрешённых, добавляем .html
-            if os.path.splitext(file_path)[1] not in DEFAULT_ALLOWED_EXTS:
+            # Важно: архивы не должны переименовываться
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext not in DEFAULT_ALLOWED_EXTS and ext not in ARCHIVE_EXTS:
                 new_path = file_path + '.html'
                 os.rename(file_path, new_path)
                 logger.debug(f"Файл без расширения переименован: {file_path} -> {new_path}")
@@ -264,3 +307,29 @@ async def _download_file(
         except Exception as e:
             logger.exception(f"Неожиданная ошибка при скачивании {url}")
             stats["errors"].append(f"tender {tender_number}: {url} - unexpected error: {str(e)}")
+
+
+if __name__ == "__main__":
+    import sys
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # Пример использования:
+    # Укажите путь к вашему JSONL-файлу
+    jsonl_file = r"F:\Python projects\Aut\storage\tenders\extracted_texts\all_tenders_data_20260327_011842.jsonl"
+    download_dir = "downloaded_test"
+    max_concurrent = 5
+    overwrite = False
+    timeout = 30
+
+    async def main():
+        stats = await download_tender_files_async(
+            jsonl_path=jsonl_file,
+            base_download_dir=download_dir,
+            max_concurrent_files=max_concurrent,
+            overwrite=overwrite,
+            timeout=timeout
+        )
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+
+    asyncio.run(main())

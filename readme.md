@@ -44,7 +44,7 @@
 - `playwright` – браузерная автоматизация  
 - `sentence-transformers`, `chromadb`, `faiss-cpu` – RAG и эмбеддинги  
 - `pandas`, `openpyxl` – работа с Excel  
-- `pdfplumber`, `python-docx`, `beautifulsoup4` – извлечение текста  
+- `pymudpf`, `python-docx`, `beautifulsoup4` – извлечение текста  
 - `rank-bm25`, `langchain`, `nltk` – вспомогательные инструменты  
 - `rarfile`, `py7zr` – распаковка архивов  
 - `python-dotenv` – загрузка переменных окружения
@@ -110,7 +110,7 @@
 
 ### 3.10. Зависимости от системных библиотек
 
-- Для работы `pdfplumber` и `python-docx` дополнительных библиотек не требуется, но для `lxml` (используется в BeautifulSoup) может понадобиться компилятор C (на Linux).  
+- Для работы `pymupdf` и `python-docx` дополнительных библиотек не требуется, но для `lxml` (используется в BeautifulSoup) может понадобиться компилятор C (на Linux).  
 - На Alpine Linux могут потребоваться пакеты `gcc`, `musl-dev`, `python3-dev`.
 
 ---
