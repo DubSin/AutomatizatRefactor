@@ -345,7 +345,7 @@ def _extract_doc_via_word(file_path):
 # ------------------------------------------------------------
 # Асинхронная обёртка
 # ------------------------------------------------------------
-async def extract_text_async(file_path, max_pages=None, extract_tables=False):
+async def extract_text_async(file_path, max_pages=None, extract_tables=True):
     return await asyncio.to_thread(extract_text, file_path, max_pages, extract_tables)
 
 # ------------------------------------------------------------
@@ -358,7 +358,7 @@ async def process_folder(
     concurrency: Optional[int] = None,
     max_depth: Optional[int] = MAX_DEPTH,
     keywords: Optional[List[str]] = FILES_KEYWORDS,
-    extract_tables: bool = False
+    extract_tables: bool = True
 ) -> List[str]:
     """
     Обходит папку input_folder, извлекает текст из всех поддерживаемых файлов
