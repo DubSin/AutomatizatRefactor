@@ -8,6 +8,7 @@ import sys
 import os
 import asyncio
 import argparse
+from pipeline.config import HEADLESS_MODE
 
 # Добавляем путь к папке pipeline (где лежат все модули)
 pipeline_dir = os.path.join(os.path.dirname(__file__), 'pipeline')
@@ -32,7 +33,7 @@ def main() -> None:
         description="Запуск пайплайна обработки тендеров (почта → скачивание → извлечение текста → классификация → отчёт)"
     )
     parser.add_argument(
-        '--headless', action='store_true', default=False,
+        '--headless', action='store_true', default=HEADLESS_MODE,
         help='Запуск браузера в headless режиме (без графического интерфейса)'
     )
     parser.add_argument(

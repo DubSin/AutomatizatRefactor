@@ -8,9 +8,14 @@ load_dotenv(os.path.join(PIPELINE_DIR, ".env"))
 
 # URL для авторизации на rostender.info
 AUTH_URL = os.getenv("AUTH_URL")
+LOGIN=os.getenv("LOGIN")
+LOG_PASSWORD=os.getenv("LOG_PASSWORD")
+PROXY=None
 
 
-TENDER_URL = "https://rostender.info/region/kirovskaya-oblast/91044786-tender-okazanie-ohrannyh-uslug"
+TENDER_URL = "https://rostender.info/tender/91014627?h=2393607-4fc2e6aff24ede30e8296e2c5e7a82af-1"
+
+HEADLESS_MODE = False
 
 # Хранилище артефактов (json/jsonl, кеши эмбеддингов, векторные базы, отчёты).
 # По умолчанию всё складывается в `storage/` внутри проекта, но можно переопределить
@@ -90,10 +95,10 @@ MAX_PDF_PAGES = 5
 # Ограничение "страниц" / параграфов для DOCX
 MAX_DOCX_PARAGRAPHS = 100
 
-FILES_KEYWORDS = ["ТЗ", "Извещение", "техническая", "документация", "задание", "проекта", "проект", "техническое задание", "спецификация", "технические требования"]
+FILES_KEYWORDS = ["ТЗ", "Извещение", "техническая", "документация", "задание", "проекта", "проект", "техническое задание", "спецификация", "технические требования", "ооз", "онмцд"]
 
-# Обрабатывать ли .doc через MS Word (тяжёлая операция). Для максимальной скорости можно выключить.
 PROCESS_DOC = True
+
 MAX_DEPTH = 4
 
 # Уровень логирования по умолчанию для оркестратора ("INFO", "WARNING", "ERROR")
@@ -103,7 +108,7 @@ LOG_LEVEL = "INFO"
 
 # Можно указать один файл (как раньше) или список файлов.
 # Например: ['2401_Закупки.xlsx', '2601_Закупки.xlsx']
-RAG_DATA_PATH = ['2401_Закупки.xlsx', '2601_Закупки.xlsx']  # при необходимости добавьте сюда второй файл
+RAG_DATA_PATH = ['2401_Закупки.xlsx', '2601_Закупки.xlsx']  
 
 RAG_DIR = os.path.join(STORAGE_ROOT, "rag")
 RAG_EMBEDDINGS_PATH = os.path.join(RAG_DIR, "embeddings.pkl")

@@ -46,7 +46,8 @@ from config import (
     RAG_INTEREST_THRESHOLD,
     ANALYSIS_MODEL,
     RAG_MODEL_NAME,
-    FILES_KEYWORDS
+    FILES_KEYWORDS,
+    HEADLESS_MODE
 )
 from table_builder import generate_html_table, generate_excel_table
 from email_agent import fetch_links_from_emails, send_files_via_email
@@ -588,9 +589,7 @@ async def run_pipeline(
 
 
 def main():
-    import sys
-    headless = False
-    asyncio.run(run_pipeline(headless=headless))
+    asyncio.run(run_pipeline(headless=HEADLESS_MODE))
 
 
 if __name__ == "__main__":

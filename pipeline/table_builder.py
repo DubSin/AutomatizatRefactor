@@ -15,10 +15,13 @@ VISIBLE_FIELDS = {
     'delivery_place', 'customer', 'publish_date'
 }
 
+
 def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: str = "all_tenders_data.jsonl") -> None:
     """
     Читает JSONL файл из input_dir и создаёт Excel-файл с pretty-таблицей.
     Все колонки, кроме перечисленных в VISIBLE_FIELDS, будут скрыты.
+    Номер тендера становится гиперссылкой на URL.
+    Поля deep_rag_answers и deep_rag_score исключены.
     """
     jsonl_path = os.path.join(input_dir, jsonl_filename)
     if not os.path.exists(jsonl_path):
@@ -72,7 +75,6 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
     priority_fields = ['number', 'title', 'status', 'start_price', 'end_date', 'delivery_place',
                        'customer', 'publish_date', 'positions', 'predicted_category','interest_score', 'is_interesting', 'interest_reasoning']
     
-    # Перемещаем приоритетные поля в начало main_fields
     for field in reversed(priority_fields):
         if field in main_fields:
             main_fields.remove(field)
@@ -80,6 +82,11 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
 
     # Объединяем: сначала основные поля, потом deep_rag поля в конце
     fieldnames = main_fields + deep_rag_fields
+
+    # Удаляем нежелательные deep_rag поля
+    for unwanted in ['deep_rag_answers', 'deep_rag_score']:
+        if unwanted in fieldnames:
+            fieldnames.remove(unwanted)
 
     # Создаём книгу и лист
     wb = openpyxl.Workbook()
@@ -98,10 +105,8 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
         'publish_date': 'Дата публикации',
         'positions': 'Позиции',
         'predicted_category': 'Категория (ИИ)',
-        'deep_rag_score': 'Deep RAG: Оценка',
         'deep_rag_decision': 'Deep RAG: Решение',
         'deep_rag_reasoning': 'Deep RAG: Пояснение',
-        'deep_rag_answers': 'Deep RAG: Вопросы/Ответы',
         'is_interesting': 'Интересен?',
         'interest_reasoning': 'Пояснение интереса',
     }
@@ -147,7 +152,17 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
             else:
                 value = str(value) if value is not None else ''
             row.append(value)
+
         ws.append(row)
+
+        # ГИПЕРССЫЛКА НА НОМЕР ТЕНДЕРА
+        if 'number' in fieldnames:
+            number_col_idx = fieldnames.index('number') + 1
+            cell = ws.cell(row=ws.max_row, column=number_col_idx)
+            url = rec.get('url', '')
+            if url:
+                cell.hyperlink = url
+                cell.style = 'Hyperlink'
 
     # Автоподбор ширины колонок
     for col in ws.columns:
@@ -176,7 +191,9 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
 
 def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: str = "all_tenders_data.jsonl") -> None:
     """
-    Читает JSONL файл из input_dir и создаёт HTML-файл с pretty-таблицей и фильтрами.
+    Читает JSONL файл из input_dir и создаёт HTML-файл с pretty-таблицей, фильтрами
+    и кнопкой экспорта в Excel (с гиперссылками на номер тендера).
+    Поля deep_rag_answers и deep_rag_score исключены.
     """
     records = []
     all_keys: Set[str] = set()
@@ -187,7 +204,6 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
         logger.error("JSONL файл не найден: %s", jsonl_path)
         return
 
-    # 1. Чтение JSONL файла
     try:
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
@@ -216,7 +232,7 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
 
     logger.info("Загружено %d записей из %s", len(records), jsonl_path)
 
-    # 2. Определяем порядок колонок
+    # Определяем порядок колонок
     fieldnames = sorted(all_keys)
     
     # Убираем ненужные колонки
@@ -226,7 +242,6 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
         if key in fieldnames:
             fieldnames.remove(key)
     
-    # Убедимся, что delivery_place есть в списке
     if 'delivery_place' not in fieldnames:
         fieldnames.append('delivery_place')
 
@@ -257,7 +272,6 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
         'interest_reasoning'
     ]
     
-    # Перемещаем приоритетные поля в начало main_fields
     for field in reversed(priority_fields):
         if field in main_fields:
             main_fields.remove(field)
@@ -266,7 +280,12 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
     # Объединяем: сначала основные поля, потом deep_rag поля в конце
     fieldnames = main_fields + deep_rag_fields
 
-    # 3. Генерация HTML с фильтрами
+    # Удаляем нежелательные deep_rag поля
+    for unwanted in ['deep_rag_answers', 'deep_rag_score']:
+        if unwanted in fieldnames:
+            fieldnames.remove(unwanted)
+
+    # Генерация HTML
     html_content = _build_html_table(records, fieldnames)
     os.makedirs(os.path.dirname(output_html_path) or '.', exist_ok=True)
     with open(output_html_path, 'w', encoding='utf-8') as f:
@@ -275,24 +294,14 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
     logger.info("HTML-таблица создана: %s, записей: %d", output_html_path, len(records))
 
 
-def _parse_price(price_str: str) -> float:
-    """Преобразует строку цены вида '12 500,00' в число float."""
-    if not price_str:
-        return 0.0
-    cleaned = price_str.replace(' ', '').replace(',', '.').strip()
-    try:
-        return float(cleaned) if cleaned else 0.0
-    except ValueError:
-        return 0.0
-
-
 def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> str:
     """
     Формирует HTML-страницу с таблицей, фильтрами, счётчиком и экспортом в Excel.
+    При экспорте номера тендеров становятся гиперссылками с синим цветом и подчёркиванием.
+    Поля deep_rag_answers и deep_rag_score уже исключены из fieldnames.
     """
     # Fields to exclude from HTML display (they are still in records for filtering)
     exclude_from_html = {'is_interesting'}
-    # Create a copy of fieldnames for HTML columns, excluding those
     html_fieldnames = [f for f in fieldnames if f not in exclude_from_html]
 
     # Собираем уникальные категории для фильтра
@@ -315,10 +324,8 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         'publish_date': 'Дата публикации',
         'positions': 'Позиции',
         'predicted_category': 'Категория (ИИ)',
-        'deep_rag_score': 'Deep RAG: Оценка',
         'deep_rag_decision': 'Deep RAG: Решение',
         'deep_rag_reasoning': 'Deep RAG: Пояснение',
-        'deep_rag_answers': 'Deep RAG: Ответы на вопросы',
         'interest_reasoning': 'Пояснение интереса',
         'interest_score': 'Оценка интереса',
     }
@@ -328,9 +335,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     rows_html = []
     for idx, rec in enumerate(records, start=1):
         is_interesting = rec.get('is_interesting', False)
-        category = rec.get('predicted_category', '')
-        if not category:
-            category = 'Не классифицировано'
+        category = rec.get('predicted_category', '') or 'Не классифицировано'
         tr_attrs = f'data-interest="{str(is_interesting).lower()}" data-category="{category}"'
         
         cells = [f'<td style="text-align: center; font-weight: bold;">{idx}']
@@ -496,20 +501,6 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                       .replace("'", '&#39;'))
                 cells.append(f'<td style="white-space: nowrap;"><strong>{cat_escaped}</strong>')
 
-            # ---- DEEP RAG SCORE ----
-            elif key == 'deep_rag_score':
-                score = rec.get(key, '')
-                if isinstance(score, (int, float)):
-                    score_str = f"{score:.2f}"
-                else:
-                    score_str = str(score) if score is not None else ''
-                score_escaped = (score_str.replace('&', '&amp;')
-                                           .replace('<', '&lt;')
-                                           .replace('>', '&gt;')
-                                           .replace('"', '&quot;')
-                                           .replace("'", '&#39;'))
-                cells.append(f'<td style="white-space: nowrap;">{score_escaped}')
-
             # ---- DEEP RAG DECISION ----
             elif key == 'deep_rag_decision':
                 decision = rec.get(key, '')
@@ -535,48 +526,6 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                 if not reasoning_escaped:
                     reasoning_escaped = '—'
                 cells.append(f'<td style="white-space: pre-wrap; max-width: 500px;">{reasoning_escaped}')
-
-            # ---- DEEP RAG ANSWERS ----
-            elif key == 'deep_rag_answers':
-                answers_data = rec.get(key, '')
-                
-                def format_answers(data) -> str:
-                    """Форматирует данные ответов в читаемый HTML."""
-                    if not data:
-                        return '—'
-                    
-                    # Парсим, если это строка JSON
-                    if isinstance(data, str):
-                        try:
-                            data = json.loads(data)
-                        except json.JSONDecodeError:
-                            # Если не JSON, выводим как есть, но экранируем
-                            return data.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    
-                    # Если это список, перебираем элементы
-                    if isinstance(data, list):
-                        items = []
-                        for item in data:
-                            if isinstance(item, dict):
-                                items.extend(format_answers(item))
-                            else:
-                                items.append(str(item))
-                        return '<br><br>'.join(items)
-                    
-                    # Если это словарь, каждый ключ — вопрос, значение — ответ
-                    if isinstance(data, dict):
-                        parts = []
-                        for question, answer in data.items():
-                            q_escaped = str(question).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                            a_escaped = str(answer).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                            parts.append(f'<strong>{q_escaped}</strong><br>{a_escaped}')
-                        return '<br><br>'.join(parts)
-                    
-                    # Иначе просто строка
-                    return str(data).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                
-                formatted = format_answers(answers_data)
-                cells.append(f'<td style="white-space: pre-wrap; max-width: 500px;">{formatted}')
 
             # ---- ПОЯСНЕНИЕ ИНТЕРЕСА ----
             elif key == 'interest_reasoning':
@@ -618,61 +567,64 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
 
     # Блок фильтров с кнопкой экспорта и счётчиком
     filter_buttons_html = f'''
-    <div class="filters" style="margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
-        <div>
-            <span style="font-weight: bold;">Интерес:</span>
-            <button id="filter-all" class="filter-btn active">Все</button>
-            <button id="filter-interesting" class="filter-btn">Только интересные</button>
-            <button id="filter-not-interesting" class="filter-btn">Только неинтересные</button>
+    <div class="filters" style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 15px;">
+        <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-weight: bold;">Интерес:</span>
+                <button id="filter-all" class="filter-btn active">Все</button>
+                <button id="filter-interesting" class="filter-btn">Только интересные</button>
+                <button id="filter-not-interesting" class="filter-btn">Только неинтересные</button>
+            </div>
+            <div>
+                <span style="font-weight: bold;">Категория:</span>
+                <select id="category-filter">
+                    <option value="all">Все категории</option>
+                    {''.join(f'<option value="{cat}">{cat}</option>' for cat in categories)}
+                </select>
+            </div>
+            <div>
+                <span style="font-weight: bold;">Показано:</span>
+                <span id="record-count" style="font-weight: bold;">0</span> из {len(records)}
+            </div>
+            <div>
+                <span style="font-weight: bold;">Колонки:</span>
+                <button id="show-all-columns" class="filter-btn active">Все поля</button>
+                <button id="show-main-columns" class="filter-btn">Основные поля</button>
+            </div>
+            <button id="reset-filters" class="filter-btn">Сбросить фильтры</button>
+            <button id="export-excel" class="filter-btn">📊 Скачать Excel (с фильтрами)</button>
         </div>
-        <div>
-            <span style="font-weight: bold;">Категория:</span>
-            <select id="category-filter">
-                <option value="all">Все категории</option>
-                {''.join(f'<option value="{cat}">{cat}</option>' for cat in categories)}
-            </select>
+        <div id="active-filters-info" style="font-size: 0.9em; color: #2c3e50; background: #ecf0f1; padding: 8px 12px; border-radius: 6px;">
+            Фильтры не применены
         </div>
-        <div>
-            <span style="font-weight: bold;">Показано:</span>
-            <span id="record-count" style="font-weight: bold;">0</span> из {len(records)}
-        </div>
-        <div>
-            <span style="font-weight: bold;">Колонки:</span>
-            <button id="show-all-columns" class="filter-btn active">Все поля</button>
-            <button id="show-main-columns" class="filter-btn">Основные поля</button>
-        </div>
-        <button id="reset-filters" class="filter-btn">Сбросить фильтры</button>
-        <button id="export-excel" class="filter-btn">📊 Скачать Excel (с фильтрами)</button>
     </div>
     '''
 
     # JS для фильтрации, сортировки, счётчика и экспорта
     js_filter = f'''
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
     <script>
         const headers = {json.dumps(headers_ru, ensure_ascii=False)};
         const fieldKeys = {json.dumps(html_fieldnames, ensure_ascii=False)};
         const allRecords = {json.dumps(records, ensure_ascii=False)};
 
         let sortColumn = -1;
-        let sortDirection = 1; // 1 = asc, -1 = desc
-        let currentColumnsMode = 'all'; // 'all' or 'main'
+        let sortDirection = 1;
+        let currentColumnsMode = 'all';
 
         // Индексы основных полей (пропускаем первый столбец с номером)
-        // deep_rag_answers убран из основного списка
         const mainFieldKeys = ['number', 'title', 'status', 'start_price', 'end_date',
                                'delivery_place', 'customer', 'publish_date', 'positions',
                                'predicted_category', 'deep_rag_decision'];
         const mainColumnIndices = [];
         for (let i = 0; i < fieldKeys.length; i++) {{
             if (mainFieldKeys.includes(fieldKeys[i])) {{
-                mainColumnIndices.push(i + 1); // +1, так как первый столбец (0) это №
+                mainColumnIndices.push(i + 1);
             }}
         }}
 
         function parseRussianDate(dateStr) {{
             if (!dateStr) return new Date(0);
-            // Формат: dd.mm.yyyy HH:MM:SS или dd.mm.yyyy
             let parts = dateStr.split(' ');
             let datePart = parts[0];
             let timePart = parts[1] || '00:00:00';
@@ -709,7 +661,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                     aVal = a.cells[colIndex].innerText.trim();
                     bVal = b.cells[colIndex].innerText.trim();
                     const key = table.rows[0].cells[colIndex].getAttribute('title');
-                    if (key === 'start_price' || key === 'deep_rag_score') {{
+                    if (key === 'start_price') {{
                         aVal = parseFloat(aVal.replace(/[^\\d.,-]/g, '').replace(',', '.'));
                         bVal = parseFloat(bVal.replace(/[^\\d.,-]/g, '').replace(',', '.'));
                         if (isNaN(aVal)) aVal = -Infinity;
@@ -780,82 +732,181 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             document.getElementById('record-count').innerText = visibleCount;
         }}
 
-        function getFilteredData() {{
-            const rows = document.querySelectorAll('#dataTable tbody tr');
-            const visibleRows = [];
-            rows.forEach(row => {{
-                if (row.style.display !== 'none') {{
-                    visibleRows.push(row);
-                }}
-            }});
-            // Определяем, какие колонки экспортировать
-            let exportColumnIndices;
-            if (currentColumnsMode === 'main') {{
-                exportColumnIndices = [0, ...mainColumnIndices]; // включаем столбец с номером
+        function updateActiveFiltersDisplay() {{
+            let interestText = '';
+            const interestFilter = document.querySelector('.filter-btn.active')?.id || 'filter-all';
+            if (interestFilter === 'filter-interesting') interestText = 'Только интересные';
+            else if (interestFilter === 'filter-not-interesting') interestText = 'Только неинтересные';
+            else interestText = 'Все';
+            
+            const categorySelect = document.getElementById('category-filter');
+            let categoryText = categorySelect.options[categorySelect.selectedIndex]?.text || 'Все категории';
+            
+            let filtersApplied = [];
+            if (interestFilter !== 'filter-all') filtersApplied.push(`Интерес: ${{interestText}}`);
+            if (categorySelect.value !== 'all') filtersApplied.push(`Категория: ${{categoryText}}`);
+            
+            const infoDiv = document.getElementById('active-filters-info');
+            if (filtersApplied.length === 0) {{
+                infoDiv.innerHTML = '✅ Фильтры не применены. Показаны все записи.';
             }} else {{
-                // все колонки: индекс 0 + все остальные
-                const totalColumns = headers.length + 1; // +1 для номера
-                exportColumnIndices = Array.from({{length: totalColumns}}, (_, i) => i);
+                infoDiv.innerHTML = `🔍 Активные фильтры: ${{filtersApplied.join(' | ')}}`;
             }}
-            const data = [];
-            // Заголовки
-            const headerRow = ['№'];
-            for (let i = 1; i <= headers.length; i++) {{
-                if (exportColumnIndices.includes(i)) {{
-                    headerRow.push(headers[i-1]);
-                }}
-            }}
-            data.push(headerRow);
-            // Данные
-            visibleRows.forEach(row => {{
-                const rowData = [];
-                for (let i = 0; i < row.cells.length; i++) {{
-                    if (exportColumnIndices.includes(i)) {{
-                        let cellText = row.cells[i].innerText.trim();
-                        if (row.cells[i].querySelector('a')) {{
-                            cellText = row.cells[i].querySelector('a').innerText;
-                        }}
-                        rowData.push(cellText);
-                    }}
-                }}
-                data.push(rowData);
-            }});
-            return data;
         }}
 
         function downloadExcel() {{
-            const data = getFilteredData();
-            const ws = XLSX.utils.aoa_to_sheet(data);
+            let interestFilter = 'all';
+            if (document.getElementById('filter-interesting').classList.contains('active')) interestFilter = 'interesting';
+            if (document.getElementById('filter-not-interesting').classList.contains('active')) interestFilter = 'not-interesting';
+            const categoryFilter = document.getElementById('category-filter').value;
+
+            const filteredRecords = allRecords.filter(rec => {{
+                const isInteresting = rec.is_interesting === true;
+                if (interestFilter === 'interesting' && !isInteresting) return false;
+                if (interestFilter === 'not-interesting' && isInteresting) return false;
+                const category = rec.predicted_category || 'Не классифицировано';
+                if (categoryFilter !== 'all' && category !== categoryFilter) return false;
+                return true;
+            }});
+
+            const isMainMode = document.getElementById('show-main-columns').classList.contains('active');
+            let columnIndicesToExport;
+            if (isMainMode) {{
+                columnIndicesToExport = [0, ...mainColumnIndices];
+            }} else {{
+                columnIndicesToExport = Array.from({{length: headers.length + 1}}, (_, i) => i);
+            }}
+
+            const sheetData = [];
+            const headerRow = ['№'];
+            for (let i = 0; i < headers.length; i++) {{
+                if (columnIndicesToExport.includes(i+1)) {{
+                    headerRow.push(headers[i]);
+                }}
+            }}
+            sheetData.push(headerRow);
+
+            filteredRecords.forEach((rec, idx) => {{
+                const row = [];
+                for (let col = 0; col <= headers.length; col++) {{
+                    if (!columnIndicesToExport.includes(col)) continue;
+                    if (col === 0) {{
+                        row.push(idx + 1);
+                        continue;
+                    }}
+                    const fieldKey = fieldKeys[col-1];
+                    let value = rec[fieldKey];
+                    if (value === undefined || value === null) value = '';
+
+                    if (fieldKey === 'number') {{
+                        const url = rec.url || '';
+                        const displayValue = String(value);
+                        if (url) {{
+                            // Создаём гиперссылку с синим цветом и подчёркиванием
+                            row.push({{
+                                v: displayValue,
+                                l: {{ Target: url }},
+                                s: {{
+                                    font: {{
+                                        color: {{ argb: "FF0000FF" }},
+                                        underline: true
+                                    }}
+                                }}
+                            }});
+                        }} else {{
+                            row.push(displayValue);
+                        }}
+                    }}
+                    else if (fieldKey === 'is_interesting') {{
+                        row.push(value ? "Да" : "Нет");
+                    }}
+                    else if (fieldKey === 'positions' && Array.isArray(value)) {{
+                        const lines = value.map(pos => {{
+                            const name = pos.name || '';
+                            const price = pos.price ? ` - ${{pos.price}}` : '';
+                            const quantity = pos.quantity ? ` - ${{pos.quantity}}` : '';
+                            const unit = pos.unit ? ` ${{pos.unit}}` : '';
+                            return `${{name}}${{price}}${{quantity}}${{unit}}`;
+                        }});
+                        row.push(lines.join('\\n'));
+                    }}
+                    else if (typeof value === 'object') {{
+                        row.push(JSON.stringify(value, null, 2));
+                    }}
+                    else {{
+                        row.push(String(value));
+                    }}
+                }}
+                sheetData.push(row);
+            }});
+
+            // Строим лист с поддержкой стилей (xlsx-js-style)
+            const wsData = [];
+            const hyperlinkCells = [];
+
+            sheetData.forEach((rowArr, rIdx) => {{
+                const wsRow = [];
+                rowArr.forEach((cell, cIdx) => {{
+                    if (cell && typeof cell === 'object' && 'v' in cell) {{
+                        wsRow.push(cell.v);
+                        hyperlinkCells.push({{ row: rIdx, col: cIdx, url: cell.l.Target }});
+                    }} else {{
+                        wsRow.push(cell);
+                    }}
+                }});
+                wsData.push(wsRow);
+            }});
+
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+            // Применяем синий цвет + подчёркивание к ячейкам с номером тендера
+            hyperlinkCells.forEach(({{ row, col, url }}) => {{
+                const cellRef = XLSX.utils.encode_cell({{ r: row, c: col }});
+                if (ws[cellRef]) {{
+                    ws[cellRef].l = {{ Target: url }};
+                    ws[cellRef].s = {{
+                        font: {{
+                            color: {{ rgb: "0000FF" }},
+                            underline: true
+                        }}
+                    }};
+                }}
+            }});
+
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Тендеры");
             XLSX.writeFile(wb, `tenders_filtered_${{new Date().toISOString().slice(0,19).replace(/:/g, '-')}}.xlsx`);
         }}
 
-        // Обработчики фильтров
         document.getElementById('filter-all').addEventListener('click', function() {{
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
             this.classList.add('active');
             applyFilters();
+            updateActiveFiltersDisplay();
         }});
         document.getElementById('filter-interesting').addEventListener('click', function() {{
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
             this.classList.add('active');
             applyFilters();
+            updateActiveFiltersDisplay();
         }});
         document.getElementById('filter-not-interesting').addEventListener('click', function() {{
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
             this.classList.add('active');
             applyFilters();
+            updateActiveFiltersDisplay();
         }});
-        document.getElementById('category-filter').addEventListener('change', applyFilters);
+        document.getElementById('category-filter').addEventListener('change', function() {{
+            applyFilters();
+            updateActiveFiltersDisplay();
+        }});
         document.getElementById('reset-filters').addEventListener('click', function() {{
             document.getElementById('filter-all').click();
             document.getElementById('category-filter').value = 'all';
             applyFilters();
+            updateActiveFiltersDisplay();
         }});
         document.getElementById('export-excel').addEventListener('click', downloadExcel);
-
-        // Обработчики кнопок переключения колонок
         document.getElementById('show-all-columns').addEventListener('click', function() {{
             document.getElementById('show-all-columns').classList.add('active');
             document.getElementById('show-main-columns').classList.remove('active');
@@ -867,9 +918,9 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             showMainColumns();
         }});
 
-        // Инициализация: все колонки видны
         showAllColumns();
         applyFilters();
+        updateActiveFiltersDisplay();
     </script>
     '''
 
@@ -881,7 +932,6 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Сводная таблица тендеров</title>
     <style>
-        /* --- ОБЩАЯ ВЁРСТКА --- */
         html, body {{
             height: 100%;
             margin: 0;
@@ -904,11 +954,11 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin: 20px;
-            flex-shrink: 0;  /* не сжимается */
+            flex-shrink: 0;
         }}
         .table-container {{
-            flex: 1;                  /* занимает всё оставшееся пространство */
-            overflow-x: auto;         /* горизонтальная прокрутка здесь */
+            flex: 1;
+            overflow-x: auto;
             margin: 0 20px 20px 20px;
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
@@ -918,7 +968,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             width: 100%;
             border-collapse: collapse;
             font-size: 14px;
-            min-width: 1200px;       /* если нужно, можно убрать или оставить */
+            min-width: 1200px;
         }}
         th {{
             background-color: #2c3e50;
@@ -926,7 +976,6 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             padding: 14px 12px;
             text-align: left;
             cursor: pointer;
-            position: relative;
             user-select: none;
             font-weight: 600;
             white-space: nowrap;
@@ -978,7 +1027,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             white-space: nowrap;
         }}
         .footer {{
-            flex-shrink: 0;           /* не сжимается */
+            flex-shrink: 0;
             padding: 15px;
             text-align: right;
             color: #555;
@@ -988,14 +1037,6 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
-        .stats {{
-            float: left;
-        }}
-        td[style*="white-space: pre-wrap"] {{
-            max-width: 300px;
-            word-break: break-word;
-        }}
-        /* Кнопки фильтров (оставляем как есть) */
         .filter-btn {{
             background-color: #e0e0e0;
             border: none;
@@ -1027,7 +1068,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     <div class="table-container">
         <table id="dataTable">
             <thead>
-                <tr>{headers_html}</tr>
+                <tr>{headers_html}<tr>
             </thead>
             <tbody>
                 {''.join(rows_html)}
@@ -1050,11 +1091,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_html = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.html")
-    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260326_004152.jsonl")
+    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260331_020426.jsonl")
     
-    # Также генерируем Excel файл
     output_excel = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.xlsx")
-    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260326_004152.jsonl")
+    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260331_020426.jsonl")
 
     print(f"HTML таблица сгенерирована: {output_html}")
     print(f"Excel таблица сгенерирована: {output_excel}")
