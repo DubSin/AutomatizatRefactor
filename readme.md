@@ -431,6 +431,4 @@ cp pipeline/.env.example pipeline/.env   # заполните .env
 ollama pull qwen3:4b-instruct
 python main.py --headless
 ```
-По поводу .env файла, я его на гитхаб не выкладывал, обращаться лично.
-
 ---
