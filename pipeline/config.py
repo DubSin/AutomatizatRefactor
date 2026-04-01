@@ -74,7 +74,7 @@ SMTP_SERVER = "smtp.mail.ru"
 SMTP_PORT = 587
 SMTP_ACCOUNT = EMAIL_ACCOUNT      # можно использовать тот же ящик
 SMTP_PASSWORD = PASSWORD           # если используется двухфакторка, нужен пароль приложения
-SMTP_USER = "dfsfines@mail.ru"  # замените на реальный адрес получателя
+SMTP_USER = SMTP_ACCOUNT
 MAIL_FROM = SMTP_USER
 MAIL_TO = os.getenv("RECEPIENT")
 
