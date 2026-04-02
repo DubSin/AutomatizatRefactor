@@ -73,7 +73,7 @@ TRAIN_FOLDER = os.path.join(STORAGE_ROOT, "train")
 DEFAULT_ALLOWED_EXTS = {".zip", ".rar", ".docx", ".pdf", ".doc", ".json", ".xlsx", ".xls", ".html"}
 BASE_URL = "https://rostender.info"
 
-IMAP_SERVER = "imap.yandex.ru"
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.yandex.ru")
 EMAIL_ACCOUNT = os.getenv("MAIL")
 PASSWORD = os.getenv("PASSWORD")
 
@@ -86,8 +86,8 @@ ALLOWED_SENDERS = [
 ]
 
 # --- Конфигурация SMTP (для отправки) ---
-SMTP_SERVER = "smtp.yandex.ru"
-SMTP_PORT = 587
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.yandex.ru")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_ACCOUNT = EMAIL_ACCOUNT      # можно использовать тот же ящик
 SMTP_PASSWORD = PASSWORD           # если используется двухфакторка, нужен пароль приложения
 SMTP_USER = SMTP_ACCOUNT
@@ -142,10 +142,15 @@ RAG_FAISS_THRESHOLD = 0.15
 RAG_INTEREST_THRESHOLD = 0.3
 RAG_USE_INVERSE_FREQ = True
 RAG_INVERSE_FREQ_MODE = 'log'
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen3:4b-instruct")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://localhost:11434/api/generate")
+
 RAG_LLM_CONFIG = {
-    'provider': 'ollama',
-    'model': 'qwen3:4b-instruct',
-    'url': 'http://localhost:11434/api/generate'
+    'provider': LLM_PROVIDER,
+    'model': LLM_MODEL,
+    'url': LLM_API_URL,
 }
 
 QUERY_EXPANSION = True
