@@ -170,9 +170,9 @@ def send_files_via_email(file_paths, subject="Отчёт по тендерам")
             server.starttls()
             server.login(SMTP_ACCOUNT, SMTP_PASSWORD)
             server.send_message(msg)
-        print(f"Письмо с вложениями успешно отправлено на {MAIL_TO}")
+        logger.info(f"Письмо с вложениями успешно отправлено на {MAIL_TO}")
     except Exception as e:
-        print(f"Ошибка при отправке письма: {e}")
+        logger.error(f"Ошибка при отправке письма: {e} с вложениями на {MAIL_TO}")
 
 
 def main():

@@ -47,11 +47,12 @@ from config import (
     ANALYSIS_MODEL,
     RAG_MODEL_NAME,
     FILES_KEYWORDS,
-    HEADLESS_MODE
+    HEADLESS_MODE,
+    USE_PROXY
 )
 from table_builder import generate_html_table, generate_excel_table
 from email_agent import fetch_links_from_emails, send_files_via_email
-from file_parser import RostenderSession
+from file_parser import RostenderSession, ProxyPool
 from text_extractor import process_folder
 from load_files import download_tender_files_async
 
@@ -370,7 +371,7 @@ def cleanup_folder(folder_path: str, keep_jsonl: bool = False):
 
 
 async def run_pipeline(
-    headless=True,
+    headless=HEADLESS_MODE,
     links_file=None,
     max_pages=None,
     log_file=LOG_FILE,
@@ -398,19 +399,47 @@ async def run_pipeline(
     os.makedirs(EXTRACTED_TEXT_FOLDER, exist_ok=True)
     os.makedirs(COMPANY_CONTEXT_DIR, exist_ok=True)
 
-    async with RostenderSession(AUTH_URL, headless=headless) as session:
-        sem = asyncio.Semaphore(MAX_CONCURRENT_TENDERS)
+    if USE_PROXY:
+        proxy_pool = ProxyPool.from_config()
+        if proxy_pool is None:
+            logger.warning("USE_PROXY=True, но PROXY_LIST пуст или не удалось загрузить. Прокси не будут использоваться.")
+    else:
+        proxy_pool = None
 
-        async def handle_tender(tender_id_int, url):
-            tender_id = str(tender_id_int)
-            async with sem:
+    async with RostenderSession(AUTH_URL, headless=headless, proxy_pool=proxy_pool) as session:
+
+        if headless:
+            # headless=True: последовательная обработка на одной странице.
+            # Сессия сохраняется между переходами; параллельность не нужна —
+            # конкурирующие goto() на self._page вызывают ERR_ABORTED.
+            logger.info("Режим headless=True: последовательная обработка тендеров")
+            for i, url in enumerate(urls, start=1):
+                tender_id = str(i)
                 download_subfolder = os.path.join(DOWNLOAD_FOLDER, tender_id)
                 logger.info("Обработка тендера %s: %s", tender_id, url)
-                await session.get_tender_info(url, download_subfolder)
+                try:
+                    await session.get_tender_info(url, download_subfolder)
+                except Exception as e:
+                    logger.error("Ошибка при обработке тендера %s (%s): %s", tender_id, url, e, exc_info=True)
+        else:
+            # headless=False: параллельная обработка, каждый тендер — своя вкладка.
+            # Вкладки открываются внутри get_tender_info и наследуют куки контекста.
+            logger.info("Режим headless=False: параллельная обработка тендеров (concurrency=%s)", MAX_CONCURRENT_TENDERS)
+            sem = asyncio.Semaphore(MAX_CONCURRENT_TENDERS)
 
-        tasks = [asyncio.create_task(handle_tender(i, url)) for i, url in enumerate(urls, start=1)]
-        if tasks:
-            await asyncio.gather(*tasks)
+            async def handle_tender(tender_id_int, url):
+                tender_id = str(tender_id_int)
+                async with sem:
+                    download_subfolder = os.path.join(DOWNLOAD_FOLDER, tender_id)
+                    logger.info("Обработка тендера %s: %s", tender_id, url)
+                    try:
+                        await session.get_tender_info(url, download_subfolder)
+                    except Exception as e:
+                        logger.error("Ошибка при обработке тендера %s (%s): %s", tender_id, url, e, exc_info=True)
+
+            tasks = [asyncio.create_task(handle_tender(i, url)) for i, url in enumerate(urls, start=1)]
+            if tasks:
+                await asyncio.gather(*tasks)
 
         # 3. Сбор всех data.json в один JSONL файл
         logger.info("Начинаем сбор данных из JSON файлов в JSONL формат...")

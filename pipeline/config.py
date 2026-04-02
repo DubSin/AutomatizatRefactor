@@ -10,12 +10,28 @@ load_dotenv(os.path.join(PIPELINE_DIR, ".env"))
 AUTH_URL = os.getenv("AUTH_URL")
 LOGIN=os.getenv("LOGIN")
 LOG_PASSWORD=os.getenv("LOG_PASSWORD")
-PROXY=None
+USE_PROXY = os.getenv("USE_PROXY")
+if USE_PROXY == "True":
+    USE_PROXY = True
+elif USE_PROXY == "False":
+    USE_PROXY = False
+PROXY_LIST = [
+    {
+        "server": "http://86.110.40.8:9434",
+        "username": "user390708",
+        "password": "6x9nu5",
+    },
+    
+]
 
 
-TENDER_URL = "https://rostender.info/tender/91014627?h=2393607-4fc2e6aff24ede30e8296e2c5e7a82af-1"
+TENDER_URL = "https://rostender.info/region/moskva-gorod/91201197"
 
-HEADLESS_MODE = False
+HEADLESS_MODE = os.getenv("HEADLESS_MODE")
+if HEADLESS_MODE == "True":
+    HEADLESS_MODE = True
+elif HEADLESS_MODE == "False":
+    HEADLESS_MODE = False
 
 # Хранилище артефактов (json/jsonl, кеши эмбеддингов, векторные базы, отчёты).
 # По умолчанию всё складывается в `storage/` внутри проекта, но можно переопределить
@@ -57,7 +73,7 @@ TRAIN_FOLDER = os.path.join(STORAGE_ROOT, "train")
 DEFAULT_ALLOWED_EXTS = {".zip", ".rar", ".docx", ".pdf", ".doc", ".json", ".xlsx", ".xls", ".html"}
 BASE_URL = "https://rostender.info"
 
-IMAP_SERVER = "imap.mail.ru"
+IMAP_SERVER = "imap.yandex.ru"
 EMAIL_ACCOUNT = os.getenv("MAIL")
 PASSWORD = os.getenv("PASSWORD")
 
@@ -65,18 +81,19 @@ PASSWORD = os.getenv("PASSWORD")
 ALLOWED_SENDERS = [
     "info@rostender.info",
     "tender@rostender.info",
-    os.getenv("RECEPIENT"),
+    os.getenv("RECIPIENT"),
     "mondeblum@gmail.com"
 ]
 
 # --- Конфигурация SMTP (для отправки) ---
-SMTP_SERVER = "smtp.mail.ru"
+SMTP_SERVER = "smtp.yandex.ru"
 SMTP_PORT = 587
 SMTP_ACCOUNT = EMAIL_ACCOUNT      # можно использовать тот же ящик
 SMTP_PASSWORD = PASSWORD           # если используется двухфакторка, нужен пароль приложения
 SMTP_USER = SMTP_ACCOUNT
 MAIL_FROM = SMTP_USER
-MAIL_TO = os.getenv("RECEPIENT")
+MAIL_TO = os.getenv("RECIPIENT")
+
 
 # ===== Настройки производительности пайплайна =====
 
@@ -95,7 +112,12 @@ MAX_PDF_PAGES = 5
 # Ограничение "страниц" / параграфов для DOCX
 MAX_DOCX_PARAGRAPHS = 100
 
-FILES_KEYWORDS = ["ТЗ", "Извещение", "техническая", "документация", "задание", "проекта", "проект", "техническое задание", "спецификация", "технические требования", "ооз", "онмцд"]
+FILES_KEYWORDS = ["ТЗ", "Извещение", "техническая", "документация", "задание", "проекта", "проект",
+ "техническое задание", "спецификация", "технические требования", "ооз", "онмцд", 'поставка', 'поставки',
+  'приборы учета', 'приборы', 'счетчики', 'счетчик', 'счетчики учета', 'счетчик учета',
+   'счетчики учета электроэнергии', 'счетчик учета электроэнергии', 'счетчики учета воды',
+    'счетчик учета воды', 'счетчики учета тепла', 'счетчик учета тепла', 'счетчики учета газа',
+     'счетчик учета газа', 'приборы учета электроэнергии', 'приборы учета воды', 'приборы учета тепла', 'приборы учета газа']
 
 PROCESS_DOC = True
 
@@ -133,6 +155,8 @@ if not os.path.isabs(COMPANY_CONTEXT_DIR):
 
 MIN_CONFIDENCE = 0.5
 EXCLUDED_CATEGORIES = ["Работы", "Освещение", 'Не профиль']
+
+SCREENSHOT_DIR = os.path.join(STORAGE_ROOT, "screenshots")
 
 # ===== Настройки глубокого анализа (deep RAG) =====
 
