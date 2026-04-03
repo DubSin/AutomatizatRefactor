@@ -82,7 +82,8 @@ ALLOWED_SENDERS = [
     "info@rostender.info",
     "tender@rostender.info",
     os.getenv("RECIPIENT"),
-    "mondeblum@gmail.com"
+    "mondeblum@gmail.com",
+    "mailer@rostenders.info"
 ]
 
 # --- Конфигурация SMTP (для отправки) ---
