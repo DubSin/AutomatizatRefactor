@@ -24,7 +24,7 @@ openpyxl>=3.1.0
 xlrd>=2.0.1                        # чтение старых .xls файлов (pandas backend)
  
 # --- PDF ---
-pymupdf>=1.27.1                    # PyMuPDF (fitz) — быстрое извлечение текста
+pymupdf==1.24.14                # PyMuPDF (fitz) — быстрое извлечение текста
 pdfplumber>=0.10.0                 # извлечение таблиц из PDF (опционально, медленнее)
  
 # --- Word / DOCX ---
