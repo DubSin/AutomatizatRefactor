@@ -160,7 +160,10 @@ LOG_PASSWORD=your_password
 # Почта (IMAP/SMTP)
 MAIL=your@mail.ru
 PASSWORD=your_app_password            # пароль приложения, не основной
-RECEPIENT=allowed_sender@example.com  # дополнительный разрешённый отправитель
+RECIPIENT=allowed_sender@example.com  # дополнительный разрешённый отправитель (IMAP ALLOWED_SENDERS)
+
+# Получатели отчётов: один адрес или несколько через запятую
+RECIPIENTS=user1@example.com,user2@example.com
 
 # Хранилище (опционально, по умолчанию ./storage)
 STORAGE_ROOT=./storage
@@ -263,7 +266,7 @@ python -m pipeline.rag_classifier
 ### `email_agent.py`
 - Подключение к IMAP (mail.ru по умолчанию), поиск непрочитанных писем от разрешённых отправителей.
 - Извлечение ссылок `rostender.info/tender/` из HTML и plain-text тел писем.
-- Отправка отчётов (HTML + XLSX) через SMTP.
+- Отправка отчётов (HTML + XLSX) через SMTP **нескольким получателям**: список адресов задаётся через переменную `RECIPIENTS` в `.env` (через запятую). Если переменная не задана, используется `RECIPIENT` как fallback.
 
 ### `file_parser.py`
 - Браузерная сессия через Playwright + playwright-stealth (обход антибот-защиты).
@@ -362,7 +365,8 @@ python -m pipeline.rag_classifier
 
 - Используйте **пароль приложения** (не основной пароль) для mail.ru, yandex.ru.
 - Убедитесь, что IMAP включён в настройках почтового ящика.
-- Разрешённые отправители задаются в `ALLOWED_SENDERS` (`config.py`).
+- Разрешённые отправители (входящие) задаются в `ALLOWED_SENDERS` (`config.py`).
+- Получатели отчётов задаются через `RECIPIENTS` в `.env`. Для одного адреса — просто укажите его без запятых. Для нескольких — перечислите через запятую: `RECIPIENTS=a@example.com,b@example.com`.
 
 ### 10.3. Playwright и браузер
 

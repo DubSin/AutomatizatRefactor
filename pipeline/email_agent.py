@@ -141,7 +141,8 @@ def send_files_via_email(file_paths, subject="Отчёт по тендерам")
     # Создаём контейнер письма
     msg = MIMEMultipart()
     msg['From'] = MAIL_FROM
-    msg['To'] = MAIL_TO
+    recipients = MAIL_TO if isinstance(MAIL_TO, list) else [MAIL_TO]
+    msg['To'] = ", ".join(recipients)
     msg['Subject'] = subject
 
     # Текст письма (можно добавить описание)
@@ -169,10 +170,10 @@ def send_files_via_email(file_paths, subject="Отчёт по тендерам")
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_ACCOUNT, SMTP_PASSWORD)
-            server.send_message(msg)
-        logger.info(f"Письмо с вложениями успешно отправлено на {MAIL_TO}")
+            server.sendmail(MAIL_FROM, recipients, msg.as_string())
+        logger.info(f"Письмо с вложениями успешно отправлено на {', '.join(recipients)}")
     except Exception as e:
-        logger.error(f"Ошибка при отправке письма: {e} с вложениями на {MAIL_TO}")
+        logger.error(f"Ошибка при отправке письма: {e} с вложениями на {', '.join(recipients)}")
 
 
 def main():
