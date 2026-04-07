@@ -338,14 +338,14 @@ class RostenderSession:
 
         # --- Заход через главную, а не сразу на /login ---
         logger.info("Заход через главную страницу перед авторизацией")
-        await self._page.goto("https://rostender.info/", wait_until="networkidle", timeout=30000)
+        await self._page.goto("https://rostender.info/", wait_until="networkidle", timeout=60000)
         await self._human_delay(1000, 2500)
         await self._human_scroll(self._page)
         await self._human_delay(500, 1500)
 
         login_page_url = "https://rostender.info/login"
         logger.info("Переход на страницу входа: %s", login_page_url)
-        await self._page.goto(login_page_url, wait_until="networkidle", timeout=30000)
+        await self._page.goto(login_page_url, wait_until="networkidle", timeout=60000)
         await self._human_delay(600, 1400)
 
         pwd_input = self._page.locator('input[type="password"]')
@@ -381,7 +381,7 @@ class RostenderSession:
         btn_locator = self._page.get_by_role("button", name="Войти")
         await btn_locator.wait_for(state="visible", timeout=10000)
 
-        async with self._page.expect_navigation(wait_until="networkidle", timeout=30000):
+        async with self._page.expect_navigation(wait_until="networkidle", timeout=60000):
             await self._human_click(self._page, btn_locator)
 
         await self._page.wait_for_load_state("networkidle", timeout=15000)

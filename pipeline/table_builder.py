@@ -294,6 +294,24 @@ def generate_html_table(input_dir: str, output_html_path: str, jsonl_filename: s
     logger.info("HTML-таблица создана: %s, записей: %d", output_html_path, len(records))
 
 
+def _get_xlsx_js_inline() -> str:
+    """
+    Скачивает xlsx-js-style и возвращает содержимое для встраивания в HTML.
+    Если скачать не удалось — возвращает None, и будет использован CDN.
+    """
+    import urllib.request
+    url = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            js_content = resp.read().decode("utf-8")
+            logger.info("xlsx-js-style успешно встроен в HTML (%d байт)", len(js_content))
+            return js_content
+    except Exception as e:
+        logger.warning("Не удалось скачать xlsx-js-style для встраивания: %s. Будет использован CDN.", e)
+        return None
+
+
 def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> str:
     """
     Формирует HTML-страницу с таблицей, фильтрами, счётчиком и экспортом в Excel.
@@ -600,9 +618,17 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     </div>
     '''
 
+    # Встраиваем xlsx-js-style прямо в HTML для офлайн-работы
+    xlsx_js = _get_xlsx_js_inline()
+    if xlsx_js:
+        xlsx_script_tag = f'<script>{xlsx_js}</script>'
+    else:
+        # Fallback на CDN, если скачать при генерации не удалось
+        xlsx_script_tag = '<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>'
+
     # JS для фильтрации, сортировки, счётчика и экспорта
     js_filter = f'''
-    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    {xlsx_script_tag}
     <script>
         const headers = {json.dumps(headers_ru, ensure_ascii=False)};
         const fieldKeys = {json.dumps(html_fieldnames, ensure_ascii=False)};
@@ -875,7 +901,18 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
 
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Тендеры");
-            XLSX.writeFile(wb, `tenders_filtered_${{new Date().toISOString().slice(0,19).replace(/:/g, '-')}}.xlsx`);
+
+            // Совместимое скачивание через Blob (работает в Chrome, Firefox, Edge, Safari)
+            const filename = `tenders_filtered_${{new Date().toISOString().slice(0,19).replace(/:/g, '-')}}.xlsx`;
+            const wbout = XLSX.write(wb, {{ bookType: 'xlsx', type: 'array' }});
+            const blob = new Blob([wbout], {{ type: 'application/octet-stream' }});
+            const dlUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = dlUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {{ document.body.removeChild(a); URL.revokeObjectURL(dlUrl); }}, 100);
         }}
 
         document.getElementById('filter-all').addEventListener('click', function() {{
@@ -1091,10 +1128,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_html = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.html")
-    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260331_020426.jsonl")
+    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260406_160324.jsonl")
     
     output_excel = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.xlsx")
-    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260331_020426.jsonl")
+    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260406_160324.jsonl")
 
     print(f"HTML таблица сгенерирована: {output_html}")
     print(f"Excel таблица сгенерирована: {output_excel}")
