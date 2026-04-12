@@ -441,6 +441,7 @@ class RostenderSession:
         if clean_url != tender_url:
             logger.info("URL тендера очищен от параметров: %s → %s", tender_url, clean_url)
 
+        tender_page_to_close = None
         try:
             if self.headless:
                 # Диагностика: логируем куки контекста перед открытием тендера
@@ -491,6 +492,7 @@ class RostenderSession:
 
                 # Используем новую страницу, чтобы не мешать странице авторизации
                 page = await self._context.new_page()
+                tender_page_to_close = page  # запоминаем, чтобы закрыть после обработки
                 try:
                     await page.goto(clean_url, wait_until="domcontentloaded", timeout=30000)
                 except Exception as e:
@@ -673,6 +675,14 @@ class RostenderSession:
         except Exception:
             await self._screenshot(page, "tender_error")
             raise
+        finally:
+            # Закрываем вкладку тендера (только при headless=False, когда создавали новую страницу)
+            if tender_page_to_close is not None:
+                try:
+                    await tender_page_to_close.close()
+                    logger.debug("Вкладка тендера закрыта")
+                except Exception as e:
+                    logger.warning("Не удалось закрыть вкладку тендера: %s", e)
 
 
 async def get_tender_data(auth_url, tender_url, download_folder, headless=True, proxy=None,

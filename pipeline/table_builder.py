@@ -1128,10 +1128,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_html = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.html")
-    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260406_160324.jsonl")
+    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260407_181237.jsonl")
     
     output_excel = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.xlsx")
-    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260406_160324.jsonl")
+    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260407_181237.jsonl")
 
     print(f"HTML таблица сгенерирована: {output_html}")
     print(f"Excel таблица сгенерирована: {output_excel}")
