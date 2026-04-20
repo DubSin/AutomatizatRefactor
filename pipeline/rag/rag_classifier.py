@@ -111,12 +111,12 @@ class TenderClassifierRAG:
         data_cache_path: str = 'data_cache.pkl',  # путь для кэша DataFrame
         model_name: str = "intfloat/multilingual-e5-large",
         k: int = 10,                     # число ближайших соседей
-        faiss_threshold: float = 0.15,    # порог для поиска (если ниже – сразу "Не профиль")
+        faiss_threshold: float = 0.10,    # порог для поиска (если ниже – сразу "Не профиль")
         use_inverse_freq: bool = True,
         inverse_freq_mode: str = "log",
         llm_config: Optional[Dict] = None,  # конфигурация LLM
         company_context_dir: Optional[str] = None,
-        interest_threshold: float = 0.5,     # порог для преобразования interest_score в is_interesting
+        interest_threshold: float = 0.35,     # порог для преобразования interest_score в is_interesting
         device: str = "auto"
     ):
         """
@@ -402,7 +402,7 @@ class TenderClassifierRAG:
     def _fallback_vote(self, similar: List[Dict]) -> Tuple[str, float]:
         """Взвешенное голосование с учётом близости к центроиду и весов категорий."""
         # Если все сходства очень низкие, возвращаем "Не профиль"
-        if not similar or max(item['similarity'] for item in similar) < 0.2:
+        if not similar or max(item['similarity'] for item in similar) < 0.1:
             return "Не профиль", 0.0
 
         cat_weights = {}
@@ -478,7 +478,7 @@ class TenderClassifierRAG:
             full_text = self.embedder.tokenizer.convert_tokens_to_string(tokens)
         return full_text
 
-    async def _call_llm_async(self, tender_text: str, similar: List[Dict], max_retries: int = 2):
+    async def _call_llm_async(self, tender_text: str, similar: List[Dict], max_retries: int = 2, low_confidence_mode: bool = False):
         """Асинхронная версия вызова LLM."""
         company_context = self._load_company_context()
         company_context_block = f"""
@@ -498,23 +498,26 @@ class TenderClassifierRAG:
 
         categories_str = ", ".join(self.all_categories)
 
-        base_prompt = f"""Ты — строгий классификатор тендеров. Работаешь только с тем, что явно написано в тексте. Не додумываешь, не предполагаешь, не "улучшаешь" тендер.
+        low_conf_note = """
+ПРИМЕЧАНИЕ: сходство этого тендера с обучающей базой невысокое. Это может означать нестандартную формулировку, а не отсутствие профильности. Будь чуть лояльнее при сомнениях — лучше пропустить на следующий этап, чем отсечь потенциально интересный тендер.
+""" if low_confidence_mode else ""
 
+        base_prompt = f"""Ты — классификатор тендеров. Твоя задача — определить категорию и оценить интерес тендера для компании.
+{low_conf_note}
 {company_context_block}
 
 ═══════════════════════════════════════
-СТОП-СИГНАЛЫ → категория "Не профиль", interest_score 0.0–0.1:
-Если в тексте тендера присутствует ЛЮБОЙ из следующих признаков — это "Не профиль":
-- Только поверка приборов учёта (без поставки, монтажа или замены)
-- Только техническое обслуживание / сервис / ремонт существующего оборудования
-- Только проектирование / изыскания / обследование (без поставки и монтажа ПУ)
-- Только строительные / общестроительные работы без систем учёта
-- Светофоры, дорожные знаки, видеонаблюдение, СКУД, пожарная сигнализация
-- Поставка оборудования, не связанного с учётом ресурсов (вода, э/э, тепло, газ)
-НЕ пытайся найти причину, чтобы засчитать тендер — если стоп-сигнал есть, ставь "Не профиль".
+ЧЁТКИЕ ПРИЗНАКИ "Не профиль" (только при явном наличии В ТЕКСТЕ):
+- Исключительно поверка приборов учёта — и больше ничего (без поставки, монтажа или замены)
+- Исключительно техническое обслуживание / ремонт уже установленного оборудования — и больше ничего
+- Исключительно проектирование / изыскания — без поставки или монтажа приборов учёта
+- Только общестроительные работы, не связанные с учётом ресурсов (вода, э/э, тепло, газ)
+- Оборудование явно не связано с учётом ресурсов (светофоры, видеонаблюдение, СКУД, пожарная сигнализация и т.п.)
+
+ВАЖНО: если тендер содержит хотя бы ОДИН из перечисленных элементов профиля В ДОПОЛНЕНИЕ к непрофильным работам — это НЕ "Не профиль". При сомнении — выбирай профильную категорию с низким interest_score (0.2–0.4), а не "Не профиль".
 ═══════════════════════════════════════
 
-ДОПУСТИМЫЕ КАТЕГОРИИ (только из этого списка, никаких других):
+ДОПУСТИМЫЕ КАТЕГОРИИ (только из этого списка):
 {categories_str}
 
 ПОХОЖИЕ ТЕНДЕРЫ ИЗ БАЗЫ (для ориентира):
@@ -526,22 +529,19 @@ class TenderClassifierRAG:
 ═══════════════════════════════════════
 ИНСТРУКЦИЯ:
 
-ШАГ 1. Проверь стоп-сигналы (список выше). Если хотя бы один сработал → category = "Не профиль", interest_score = 0.05, переходи к шагу 3.
+ШАГ 1. Есть ли в тексте ЯВНЫЙ признак "Не профиль" (см. список выше), и нет ни одного профильного элемента?
+  - Если ДА → category = "Не профиль", interest_score = 0.05
+  - Если НЕТ или СОМНЕВАЕШЬСЯ → переходи к шагу 2
 
-ШАГ 2. Если стоп-сигналов нет:
-  - Выбери категорию строго из списка выше.
-  - confidence: насколько ты уверен (0–1). Если текст тендера двусмысленный — снижай.
-  - interest_score: только на основе фактов в тексте:
-      0.8–1.0 → явное упоминание LoRaWAN / умных счётчиков / АСКУЭ / поставки ПУ с передачей данных
-      0.5–0.7 → поставка ПУ или работы по учёту, но без явных технологий
-      0.2–0.4 → косвенное отношение к учёту, неполные данные
-      0.0–0.1 → стоп-сигнал или нет связи с профилем компании
+ШАГ 2. Выбери категорию из списка выше. Оцени interest_score:
+    0.8–1.0 → явное LoRaWAN / умные счётчики / АСКУЭ / поставка ПУ с передачей данных
+    0.5–0.7 → поставка ПУ или работы по учёту без явных технологий
+    0.2–0.4 → косвенное отношение к учёту, неполные данные или смешанный тендер
+    0.0–0.1 → явный "Не профиль"
 
 ШАГ 3. Заполни JSON:
-  - reasoning: одно предложение — ТОЛЬКО факты из текста тендера. Формат: "Тип работ: X. Объект: Y. Технологии: Z или не упомянуты."
-  - interest_reasoning: одно предложение — какой именно факт из текста повлиял на оценку.
-
-ЗАПРЕЩЕНО: домысливать тип работ, предполагать наличие монтажа там, где написана только поверка, смягчать формулировки.
+  - reasoning: одно предложение — факты из текста. Формат: "Тип работ: X. Объект: Y. Технологии: Z или не упомянуты."
+  - interest_reasoning: одно предложение — какой факт повлиял на оценку.
 
 Ответ ТОЛЬКО в формате JSON:
 {{
@@ -554,26 +554,24 @@ class TenderClassifierRAG:
 
 JSON:"""
 
-        strict_prompt = f"""Ты — строгий классификатор тендеров. Работаешь ТОЛЬКО с фактами из текста. Не додумываешь.
-
+        strict_prompt = f"""Ты — классификатор тендеров.
+{low_conf_note}
 {company_context_block}
 
-СТОП-СИГНАЛЫ → немедленно "Не профиль":
-- Только поверка приборов учёта (без поставки / монтажа / замены)
-- Только ТО / сервис / ремонт существующего оборудования
-- Только проектирование / обследование без поставки и монтажа ПУ
-- Общестроительные работы без систем учёта
+Признаки "Не профиль" (только при явном наличии в тексте и отсутствии профильных элементов):
+- Только поверка ПУ (без поставки / монтажа / замены)
+- Только ТО / ремонт существующего оборудования
+- Только проектирование без поставки и монтажа ПУ
+- Только общестроительные работы без систем учёта ресурсов
 - Оборудование не связано с учётом ресурсов
+
+При сомнении — выбирай профильную категорию с низким interest_score, а не "Не профиль".
 
 ДОПУСТИМЫЕ КАТЕГОРИИ:
 {categories_str}
 
 ТЕНДЕР:
 {tender_text}
-
-Если сработал стоп-сигнал → category = "Не профиль", interest_score = 0.05.
-Если нет → выбери категорию из списка, оцени interest_score строго по фактам текста.
-reasoning и interest_reasoning — только факты, одно предложение каждое.
 
 Ответ строго JSON:
 {{
@@ -658,21 +656,30 @@ JSON:"""
         similar = self._find_similar(tender_text)
         max_sim = max([item['similarity'] for item in similar]) if similar else 0.0
 
-        if max_sim < self.faiss_threshold:
+        # Жёсткий порог снижен: очень слабые совпадения отсекаем,
+        # всё остальное отправляем к LLM (даже при низком сходстве)
+        hard_cutoff = self.faiss_threshold * 0.6  # ~0.06 при дефолтном 0.10
+        if max_sim < hard_cutoff:
             return {
                 'text': tender_text,
                 'predicted_category': 'Не профиль',
                 'confidence': 0.0,
-                'reasoning': f'Максимальное сходство с базой {max_sim:.3f} ниже порога {self.faiss_threshold}',
+                'reasoning': f'Максимальное сходство с базой {max_sim:.3f} ниже минимального порога {hard_cutoff:.3f}',
                 'neighbors': similar,
                 'max_similarity': max_sim,
                 'is_interesting': False,
                 'interest_score': 0.0,
-                'interest_reasoning': 'Низкое сходство с обучающей базой.',
+                'interest_reasoning': 'Нет совпадений с обучающей базой.',
             }
 
+        # Если сходство между hard_cutoff и faiss_threshold — помечаем как "слабый сигнал"
+        # и всё равно передаём LLM, но он будет знать об этом
+        low_confidence_mode = max_sim < self.faiss_threshold
+
         fb_cat, fb_conf = self._fallback_vote(similar)
-        llm_cat, llm_conf, llm_reason, llm_interesting, llm_interest_score, llm_interest_reason = await self._call_llm_async(tender_text, similar)
+        llm_cat, llm_conf, llm_reason, llm_interesting, llm_interest_score, llm_interest_reason = await self._call_llm_async(
+            tender_text, similar, low_confidence_mode=low_confidence_mode
+        )
 
         final_cat, final_conf, final_reason, final_interesting, final_interest_score, final_interest_reason = self._combine_predictions(
             fb_cat, fb_conf,
@@ -763,12 +770,12 @@ if __name__ == "__main__":
         index_path='faiss.index',
         data_cache_path='data_cache.pkl',
         k=10,
-        faiss_threshold=0.15,
+        faiss_threshold=0.10,
         use_inverse_freq=True,
         inverse_freq_mode='log',
         llm_config=llm_config,
         company_context_dir='company_context',  # папка с .txt и .md файлами о компании
-        interest_threshold=0.5                   # порог для is_interesting
+        interest_threshold=0.35                   # порог для is_interesting
     )
 
     # Обработка файла

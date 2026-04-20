@@ -207,6 +207,30 @@ class TenderRAGAnalyzer:
             return response.strip()
         return question
 
+    def _generate_multi_queries(self, question: str) -> List[str]:
+        """
+        Генерирует несколько перефразировок вопроса для расширенного поиска (multi-query RAG).
+        Возвращает список из оригинального вопроса + 2-3 вариантов.
+        """
+        prompt = f"""Ты помогаешь улучшить поиск по тендерной документации.
+Сгенерируй 3 различные перефразировки следующего вопроса для поиска релевантных фрагментов.
+Используй синонимы, ключевые слова, краткие формулировки, профессиональные термины.
+Каждый вариант — на отдельной строке. Только перефразировки, без нумерации и пояснений.
+
+Вопрос: {question}
+
+Перефразировки:"""
+        response = ask_llama_sync(prompt, self.llm_model)
+        queries = [question]  # Оригинальный вопрос всегда первым
+        if response:
+            for line in response.strip().splitlines():
+                line = line.strip().lstrip("-•1234567890.). ")
+                if line and len(line) > 5 and line not in queries:
+                    queries.append(line)
+                if len(queries) >= 4:  # Оригинал + 3 перефразировки максимум
+                    break
+        return queries
+
     def _load_company_context(self) -> str:
         """Загружает дополнительный контекст о компании из отдельной папки."""
         if not self.company_context_dir:
@@ -362,56 +386,69 @@ class TenderRAGAnalyzer:
         self.bm25 = BM25Okapi(tokenized_corpus)
         logger.info("BM25 индекс построен (стемминг %s)", "включён" if self.use_stemmer else "отключён")
 
-    def _hybrid_search(self, query: str, top_k: int) -> List[str]:
+    def _hybrid_search(self, query: str, top_k: int, extra_queries: Optional[List[str]] = None) -> List[str]:
         """
         Гибридный поиск: объединяет результаты векторного поиска и BM25 с помощью RRF.
+        Поддерживает multi-query: если передан extra_queries, результаты по всем запросам
+        объединяются перед итоговым RRF-ранжированием.
         После получения RRF-оценок применяется бустинг на основе приоритетных ключевых слов.
         Возвращает список текстов чанков (не более top_k).
         """
-        candidate_multiplier = 2
-        vec_n_results = top_k * candidate_multiplier
+        candidate_multiplier = 3  # увеличено с 2 для лучшего охвата
+        vec_n_results = min(top_k * candidate_multiplier, len(self.all_chunk_texts))
 
-        # --- Векторный поиск ---
-        query_text = query
-        if "e5" in (self.embedding_model_name or "").lower():
-            query_text = f"query: {query}"
-        query_emb = self.embedding_model.encode([query_text], normalize_embeddings=True)[0]
+        all_queries = [query]
+        if extra_queries:
+            all_queries += [q for q in extra_queries if q and q != query]
 
-        vec_results = self.collection.query(
-            query_embeddings=[query_emb],
-            n_results=vec_n_results
-        )
-        vec_ids = vec_results['ids'][0] if vec_results['ids'] else []
-
-        # --- BM25 поиск (если доступен) ---
-        bm25_indices = []
-        if self.bm25 is not None:
-            tokenized_query = self._tokenize(query)
-            bm25_scores = self.bm25.get_scores(tokenized_query)
-            bm25_indices = np.argsort(bm25_scores)[-vec_n_results:][::-1].tolist()
-
-        if self.bm25 is None:
-            if not vec_ids:
-                return []
-            # Только векторные результаты (обрезаем до top_k)
-            return [self.all_chunk_texts[self.id_to_index[id_]] for id_ in vec_ids[:top_k]]
-
-        # --- RRF: ранговое слияние ---
-        rrf_scores = {}
+        rrf_scores: Dict[int, float] = {}
         k = 60  # параметр RRF
 
-        # Векторные результаты
-        for rank, id_ in enumerate(vec_ids):
-            if id_ not in self.id_to_index:
-                continue
-            idx = self.id_to_index[id_]
-            rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+        for q_idx, q in enumerate(all_queries):
+            # --- Векторный поиск ---
+            query_text = q
+            if "e5" in (self.embedding_model_name or "").lower():
+                query_text = f"query: {q}"
+            query_emb = self.embedding_model.encode([query_text], normalize_embeddings=True)[0]
 
-        # BM25 результаты
-        for rank, idx in enumerate(bm25_indices):
-            rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+            vec_results = self.collection.query(
+                query_embeddings=[query_emb],
+                n_results=vec_n_results
+            )
+            vec_ids = vec_results['ids'][0] if vec_results['ids'] else []
+
+            # Векторные результаты → RRF
+            for rank, id_ in enumerate(vec_ids):
+                if id_ not in self.id_to_index:
+                    continue
+                idx = self.id_to_index[id_]
+                rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+
+            # --- BM25 поиск (если доступен) ---
+            if self.bm25 is not None:
+                tokenized_query = self._tokenize(q)
+                bm25_scores = self.bm25.get_scores(tokenized_query)
+                bm25_indices = np.argsort(bm25_scores)[-vec_n_results:][::-1].tolist()
+                for rank, idx in enumerate(bm25_indices):
+                    rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+
+        if not rrf_scores:
+            return []
+
+        if self.bm25 is None and len(all_queries) == 1:
+            # Только векторные результаты без BM25 и multi-query
+            vec_ids_fallback = []
+            query_text = query
+            if "e5" in (self.embedding_model_name or "").lower():
+                query_text = f"query: {query}"
+            query_emb = self.embedding_model.encode([query_text], normalize_embeddings=True)[0]
+            vec_results = self.collection.query(query_embeddings=[query_emb], n_results=top_k)
+            vec_ids_fallback = vec_results['ids'][0] if vec_results['ids'] else []
+            return [self.all_chunk_texts[self.id_to_index[id_]] for id_ in vec_ids_fallback if id_ in self.id_to_index]
 
         # --- Бустинг на основе приоритетных ключевых слов ---
+        # Также учитываем слова из самого вопроса (question-aware boost)
+        question_words = set(query.lower().split())
         for idx in rrf_scores.keys():
             text_lower = self.all_chunk_texts[idx].lower()
             boost = 1.0
@@ -434,7 +471,13 @@ class TenderRAGAnalyzer:
                     boost += 0.05
                     break
 
-            # Применяем буст (аддитивно)
+            # Question-aware boost: если чанк содержит ≥2 слова из вопроса — лёгкий буст
+            question_hits = sum(1 for w in question_words if len(w) > 3 and w in text_lower)
+            if question_hits >= 3:
+                boost += 0.1
+            elif question_hits >= 2:
+                boost += 0.05
+
             rrf_scores[idx] *= boost
 
         # Сортируем по убыванию скорректированной RRF-оценки
@@ -445,33 +488,41 @@ class TenderRAGAnalyzer:
         result_texts = [self.all_chunk_texts[idx] for idx in top_indices]
         return result_texts
 
-    def answer_question(self, question: str, retry: bool = False) -> str:
-        # Возможно, расширяем запрос
-        search_query = question
-        if self.query_expansion and not retry:  # не расширяем при повторной попытке
-            expanded = self._expand_query(question)
-            if expanded != question:
-                logger.debug(f"Расширенный запрос: {expanded}")
-                search_query = expanded
+    def answer_question(self, question: str, retry: bool = False, tender_category: Optional[str] = None) -> str:
+        # --- Multi-query: генерируем перефразировки для лучшего охвата ---
+        extra_queries: List[str] = []
+        if not retry:
+            if self.query_expansion:
+                multi = self._generate_multi_queries(question)
+                extra_queries = multi[1:] if len(multi) > 1 else []
+                logger.debug(f"Multi-query LLM ({len(extra_queries)+1} запросов): {multi}")
+            # Дополняем статическими search hints по категории (бесплатно, без LLM)
+            if tender_category:
+                hints = get_search_hints_for_question(question, tender_category)
+                for h in hints:
+                    if h not in extra_queries:
+                        extra_queries.append(h)
+                logger.debug(f"Добавлены статические hints для '{tender_category}': {hints}")
 
-        best_docs = self._hybrid_search(search_query, self.top_k)
+        best_docs = self._hybrid_search(question, self.top_k, extra_queries=extra_queries if not retry else None)
 
         if not best_docs:
             return "Не удалось найти информацию в документации."
 
         context = "\n\n---\n\n".join(best_docs)
 
-        prompt = f"""Ты — строгий экстрактор фактов из тендерной документации. Отвечай ТОЛЬКО на основе приведённого контекста.
+        prompt = f"""Ты — аналитик тендерной документации. Твоя задача — найти ответ на вопрос в приведённом контексте.
 
 Контекст:
 {context}
 
 Вопрос: {question}
 
-Правила ответа:
-1. Если факт есть в контексте — ответь одним-двумя предложениями, процитировав ключевую фразу.
-2. Если факта нет — ответь ровно: "Не упомянуто в документации."
-3. НЕ додумывай, НЕ предполагай, НЕ объясняй.
+Инструкция:
+1. Если ответ ЯВНО есть в контексте — ответь одним-двумя предложениями, процитировав или пересказав ключевую фразу.
+2. Если ответ КОСВЕННО следует из контекста (упомянуты связанные требования, оборудование, условия) — ответь с пометкой «(косвенно)» и поясни, что именно это подразумевает.
+3. Только если информации нет совсем — ответь: "Не упомянуто в документации."
+4. НЕ додумывай факты, которых нет даже косвенно.
 
 Ответ:"""
 
@@ -483,8 +534,8 @@ class TenderRAGAnalyzer:
         if ("не упомянуто" in response.lower() or "информация отсутствует" in response.lower()) and not retry:
             logger.info("Ответ не найден, пробуем с увеличенным top_k")
             old_top_k = self.top_k
-            self.top_k = old_top_k * 2
-            response = self.answer_question(question, retry=True)
+            self.top_k = min(old_top_k * 3, len(self.all_chunk_texts))  # утроенный top_k
+            response = self.answer_question(question, retry=True, tender_category=tender_category)
             self.top_k = old_top_k
             return response
 
@@ -545,31 +596,48 @@ class TenderRAGAnalyzer:
 - has_pu_supply: есть ли явное требование к ПОСТАВКЕ приборов учёта — true/false
 - found_technologies: список технологий передачи данных, ДОСЛОВНО упомянутых в тексте. Если ни одной — пустой список []. Не додумывай — только то, что написано.
 - has_smart_metering: есть ли явные слова "умный счетчик", "интеллектуальный ПУ", "АСКУЭ", "АСУЭ", "АИИС КУЭ", "автоматизированный сбор", "удаленный съем" — true/false
+- only_service: тендер ТОЛЬКО на обслуживание/поверку/ремонт существующих ПУ без поставки новых — true/false
+- only_design: тендер ТОЛЬКО на проектирование/изыскания без поставки и монтажа ПУ — true/false
 - customer: заказчик (строка или null)
+- key_facts: список из 2–5 дословных коротких цитат или точных фактов из документации, которые определили решение (например: ["поставка счётчиков воды Ду15", "технология LoRaWAN не упомянута", "только поверка приборов учёта"])
 
 ШАГ 2. ПРИНЯТИЕ РЕШЕНИЯ (по жёстким правилам, без исключений)
 
-ПРАВИЛО A → "Подходит" (score 0.85):
-  - found_technologies содержит LoRaWAN, ИЛИ
-  - (direction == "Вода" И has_pu_supply == true И (found_technologies непустой ИЛИ has_smart_metering == true)), ИЛИ
-  - (has_smart_metering == true И has_pu_supply == true), ИЛИ
-  - (direction == "Электроэнергия" И found_technologies содержит хотя бы одну технологию из [GSM, NB-IoT, PLC, RF, RS-485, LoRaWAN] И has_pu_supply == true)
-
-ПРАВИЛО B → "На грани" (score 0.5):
-  - direction в ["Тепло", "Газ"] — ВСЕГДА "На грани", независимо от технологий
-  - direction == "Высоковольтные ПУ" — "На грани"
-  - found_technologies непустой, но LoRaWAN отсутствует, и direction не попадает под правило A
-  - has_pu_supply == true, но found_technologies пустой и direction не вода
-
-ПРАВИЛО C → "Не подходит" (score 0.1):
-  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false
-  - direction == "Работы" И has_smart_metering == false И found_technologies пустой
+ПРАВИЛО C (проверяй ПЕРВЫМ) → "Не подходит" (score 0.05–0.15):
+  - only_service == true  (только обслуживание/поверка/ремонт — нет поставки/замены)
+  - only_design == true   (только проектирование без поставки и монтажа ПУ)
   - direction == "Освещение"
-  - direction == "не определено" И has_pu_supply == false
+  - direction == "не определено" И has_pu_supply == false И found_technologies пустой
+  - direction == "Работы" И has_smart_metering == false И found_technologies пустой И has_pu_supply == false
+  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false И direction не в ["Вода","Тепло","Газ","Электроэнергия","Высоковольтные ПУ"]
+
+ПРАВИЛО A → "Подходит" (score 0.82–0.92):
+  Применяется ТОЛЬКО если правило C не сработало. Хотя бы одно из:
+  - found_technologies содержит "LoRaWAN"
+  - direction == "Вода" И has_pu_supply == true И (found_technologies непустой ИЛИ has_smart_metering == true)
+  - has_smart_metering == true И has_pu_supply == true
+  - direction == "Электроэнергия" И found_technologies содержит хотя бы одно из [GSM, NB-IoT, PLC, RF, RS-485] И has_pu_supply == true
+
+ПРАВИЛО B → "На грани" (score 0.42–0.58):
+  Применяется ТОЛЬКО если не сработали ни C, ни A. Хотя бы одно из:
+  - direction в ["Тепло", "Газ"] И has_pu_supply == true
+  - direction == "Высоковольтные ПУ" И has_pu_supply == true
+  - found_technologies непустой И has_pu_supply == true И direction не попадает под A
+
+  ВАЖНО: "На грани" запрещено если:
+  - has_pu_supply == false И found_technologies пустой → это всегда "Не подходит"
+  - direction в ["Тепло","Газ"] И has_pu_supply == false → "Не подходит"
 
 ШАГ 3. ФОРМИРОВАНИЕ reasoning
-Одно-два предложения ТОЛЬКО из найденных фактов. Формат: "Направление: X. Технологии в документе: [список или 'не упомянуты']. Поставка ПУ: да/нет. Умный учёт: да/нет. Применено правило: A/B/C."
-НЕ ПИШИ объяснений, предположений, рекомендаций.
+Подробное обоснование — 3–5 предложений. Обязательно включи:
+1. Что конкретно найдено в документации (предмет закупки, объект, условия — дословно или близко к тексту).
+2. Какие технологии упомянуты или явно отсутствуют.
+3. Есть ли требование к поставке ПУ и умному учёту — с опорой на текст.
+4. Какое правило (A / B / C) применено и почему именно оно.
+5. Что именно не позволяет поставить более высокую оценку (для B и C).
+
+Формат reasoning: связный текст, не список. Ссылайся на конкретные факты из key_facts.
+НЕ ПИШИ общих фраз вроде "тендер не профильный" без обоснования.
 
 ═══════════════════════════════════════
 Ответ ТОЛЬКО в формате JSON без лишнего текста:
@@ -578,7 +646,10 @@ class TenderRAGAnalyzer:
   "has_pu_supply": true/false,
   "found_technologies": ["...", "..."],
   "has_smart_metering": true/false,
+  "only_service": true/false,
+  "only_design": true/false,
   "customer": "..." или null,
+  "key_facts": ["...", "..."],
   "suitability_score": число,
   "decision": "Подходит" | "На грани" | "Не подходит",
   "reasoning": "..."
@@ -612,18 +683,67 @@ JSON:"""
 
         decision = parsed.get("decision", "На грани")
         reasoning = parsed.get("reasoning", "").strip()
+        direction = parsed.get("direction", "не определено")
+        found_technologies = parsed.get("found_technologies", [])
+        has_pu_supply = bool(parsed.get("has_pu_supply", False))
+        has_smart_metering = bool(parsed.get("has_smart_metering", False))
+        only_service = bool(parsed.get("only_service", False))
+        only_design = bool(parsed.get("only_design", False))
+        key_facts = parsed.get("key_facts", [])
+
+        # ── ДЕТЕРМИНИРОВАННЫЕ ПРАВИЛА ПОСТОБРАБОТКИ ─────────────────────────
+        # Применяются поверх ответа LLM — они не могут быть «домыслены» моделью.
+
+        # Правило C1: чисто сервисные / поверочные тендеры — всегда "Не подходит"
+        if only_service or only_design:
+            decision = "Не подходит"
+            score = min(score, 0.12)
+            if only_service:
+                reasoning += " [Правило C1: тендер только на обслуживание/поверку без поставки новых ПУ — Не подходит.]"
+            else:
+                reasoning += " [Правило C1: тендер только на проектирование без поставки/монтажа ПУ — Не подходит.]"
+
+        # Правило C2: нет ни поставки ПУ, ни технологий, ни умного учёта
+        elif not has_pu_supply and not found_technologies and not has_smart_metering:
+            decision = "Не подходит"
+            score = min(score, 0.12)
+            reasoning += " [Правило C2: в документации нет ни поставки ПУ, ни технологий передачи данных, ни АСКУЭ — Не подходит.]"
+
+        # Правило C3: Тепло/Газ без поставки ПУ — "Не подходит" (не "На грани")
+        elif direction in ("Тепло", "Газ") and not has_pu_supply:
+            decision = "Не подходит"
+            score = min(score, 0.15)
+            reasoning += f" [Правило C3: направление {direction} без явного требования к поставке ПУ — Не подходит.]"
+
+        # Правило C4: "На грани" без поставки ПУ и без технологий → "Не подходит"
+        elif decision == "На грани" and not has_pu_supply and not found_technologies:
+            decision = "Не подходит"
+            score = min(score, 0.18)
+            reasoning += " [Правило C4: решение 'На грани' без поставки ПУ и без технологий не обосновано — понижено до Не подходит.]"
+
+        # Правило B-страховка: Тепло/Газ с поставкой ПУ — максимум "На грани"
+        elif direction in ("Тепло", "Газ") and decision == "Подходит":
+            decision = "На грани"
+            score = min(score, 0.62)
+            reasoning += f" [Правило B-страховка: направление {direction} — не выше 'На грани' по политике компании.]"
 
         # Страховка: синхронизация score и decision
         if score >= 0.7 and decision == "Не подходит":
             decision = "На грани"
-        if score <= 0.3 and decision == "Подходит":
+            reasoning += " [Корректировка: score высокий, решение повышено до 'На грани'.]"
+        if score <= 0.25 and decision == "Подходит":
             decision = "На грани"
+            reasoning += " [Корректировка: score низкий, решение понижено до 'На грани'.]"
 
-        # Жёсткая страховка для Тепло/Газ — они всегда "На грани"
-        direction = parsed.get("direction", "не определено")
-        if direction in ("Тепло", "Газ") and decision == "Подходит":
-            decision = "На грани"
-            score = min(score, 0.65)
+        # Обогащаем reasoning структурированным резюме если оно слишком короткое
+        if len(reasoning) < 80:
+            tech_str = ", ".join(found_technologies) if found_technologies else "не упомянуты"
+            facts_str = "; ".join(key_facts) if key_facts else "не извлечены"
+            reasoning = (
+                f"Направление: {direction}. Поставка ПУ: {'да' if has_pu_supply else 'нет'}. "
+                f"Технологии: {tech_str}. Умный учёт: {'да' if has_smart_metering else 'нет'}. "
+                f"Ключевые факты: {facts_str}. Решение: {decision}."
+            )
 
         return {
             "suitability_score": score,
@@ -631,9 +751,12 @@ JSON:"""
             "reasoning": reasoning,
             # Структурированные факты
             "direction": direction,
-            "found_technologies": parsed.get("found_technologies", []),
-            "has_pu_supply": bool(parsed.get("has_pu_supply", False)),
-            "has_smart_metering": bool(parsed.get("has_smart_metering", False)),
+            "found_technologies": found_technologies,
+            "has_pu_supply": has_pu_supply,
+            "has_smart_metering": has_smart_metering,
+            "only_service": only_service,
+            "only_design": only_design,
+            "key_facts": key_facts,
             "customer": parsed.get("customer"),
         }
 
@@ -647,7 +770,7 @@ JSON:"""
         answers: Dict[str, str] = {}
         for q in questions:
             logger.debug(f"Вопрос: {q}")
-            ans = self.answer_question(q)
+            ans = self.answer_question(q, tender_category=tender_category)
             answers[q] = ans
         return answers
 
@@ -655,9 +778,99 @@ JSON:"""
 def build_category_questions(tender_category: Optional[str]) -> List[str]:
     """
     Формирует список вопросов для deep RAG в зависимости от категории тендера.
+    Каждый вопрос дополняется ключевыми синонимами для повышения recall поиска.
     """
-    extra = CATEGORY_QUESTIONS.get(tender_category, [])
-    return extra
+    base_questions = CATEGORY_QUESTIONS.get(tender_category, [])
+    return base_questions
+
+
+# Синонимичные перефразировки для каждой категории — используются при multi-query поиске
+# без вызова LLM (статические, дешевле и быстрее)
+CATEGORY_SEARCH_HINTS: Dict[str, List[str]] = {
+    "Работы": [
+        "монтаж демонтаж строительные работы установка",
+        "СРО допуск лицензия строительство",
+        "пусконаладка наладка испытания",
+        "проектная документация проект схема",
+        "поставка оборудование спецификация",
+    ],
+    "Освещение": [
+        "счетчик электроэнергии освещение свет",
+        "АСКУЭ автоматизация управление освещением",
+        "светильник лампа LED энергоэффективный",
+        "датчик движения фотодатчик реле",
+        "трансформатор тока щит учета",
+    ],
+    "ПУ и работы": [
+        "прибор учета поставка монтаж вода электроэнергия тепло газ",
+        "поверка метрологическая аттестация",
+        "гарантия обслуживание сервис",
+        "проектирование система учета АСКУЭ",
+        "интеграция система сбора данных",
+        "сертификат соответствие тип средство измерения",
+    ],
+    "Вода. Простые ПУ": [
+        "счетчик воды холодная горячая ХВС ГВС",
+        "импульсный выход дистанционный съем",
+        "поверка счетчик вода",
+        "антимагнитная защита пломба",
+        "диаметр условный проход Ду DN",
+        "радиомодуль RF NB-IoT LoRa беспроводной",
+    ],
+    "ЭЭ.Простые ПУ": [
+        "счетчик электроэнергии однофазный трехфазный",
+        "класс точности 0.5 1 2",
+        "RS-485 Modbus импульсный выход",
+        "многотарифный день ночь тариф",
+        "трансформатор тока ТТ подключение",
+        "напряжение ток номинальный",
+    ],
+    "Тепло": [
+        "теплосчетчик вычислитель расходомер термометр",
+        "поверка тепловая энергия",
+        "архив передача данных GSM модем",
+        "погрешность измерение температура",
+        "диаметр расходомер Ду материал латунь сталь",
+        "датчик температуры термопреобразователь",
+    ],
+    "Газ": [
+        "газовый счетчик мембранный ротационный ультразвуковой",
+        "диапазон расхода Qmin Qmax",
+        "поверка газ первичная периодическая",
+        "импульсный выход модуль связи газ",
+        "взрывозащита Ex взрывоопасная зона",
+        "корректор объема давление температура компенсация",
+        "фланец резьба присоединение корпус",
+    ],
+    "Технологии": [
+        "LoRaWAN GSM NB-IoT PLC RF Zigbee Wi-Fi канал связи",
+        "RS-485 Modbus протокол интерфейс",
+        "концентратор базовая станция модем шлюз",
+        "АСКУЭ АСУЭ АИИС автоматизированный сбор данных",
+        "резервный канал связи резервное питание",
+        "передача данных удаленный мониторинг телеметрия",
+        "частота 433 868 МГц диапазон радиочастота",
+    ],
+}
+
+
+def get_search_hints_for_question(question: str, tender_category: Optional[str]) -> List[str]:
+    """
+    Возвращает список дополнительных поисковых подсказок для данного вопроса
+    на основе статических синонимов категории.
+    Используется в multi-query поиске как дешёвая альтернатива LLM-расширению.
+    """
+    hints = CATEGORY_SEARCH_HINTS.get(tender_category, [])
+    # Выбираем те подсказки, у которых есть пересечение слов с вопросом
+    question_words = set(question.lower().split())
+    scored: List[tuple] = []
+    for hint in hints:
+        hint_words = set(hint.lower().split())
+        overlap = len(question_words & hint_words)
+        scored.append((overlap, hint))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    # Берём топ-2 наиболее релевантные подсказки
+    return [h for _, h in scored[:2] if _ >= 0]
 
 
 def analyze_tender_docs(
@@ -707,4 +920,4 @@ if __name__ == "__main__":
         for q, a in answers.items():
             print(f"Q: {q}\nA: {a}\n")
     else:
-        print(f"Папк {folder} не найдена")
+        print(f"Папка {folder} не найдена")
