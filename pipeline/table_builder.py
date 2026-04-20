@@ -317,6 +317,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     Формирует HTML-страницу с таблицей, фильтрами, счётчиком и экспортом в Excel.
     При экспорте номера тендеров становятся гиперссылками с синим цветом и подчёркиванием.
     Поля deep_rag_answers и deep_rag_score уже исключены из fieldnames.
+    Добавлен фильтр Deep RAG "Подходит (Deep RAG)" (только 'Подходит' или 'На грани').
     """
     # Fields to exclude from HTML display (they are still in records for filtering)
     exclude_from_html = {'is_interesting'}
@@ -326,8 +327,10 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     categories = set()
     for rec in records:
         cat = rec.get('predicted_category', '')
-        if cat:
-            categories.add(cat)
+        if cat and str(cat).strip():
+            categories.add(str(cat).strip())
+        else:
+            categories.add('Не классифицировано')
     categories = sorted(categories)
 
     # Заголовки (для отображения)
@@ -349,12 +352,16 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     }
     headers_ru = [header_names.get(k, k.replace('_', ' ').title()) for k in html_fieldnames]
 
-    # Формируем строки HTML
+    # Формируем строки HTML с атрибутами для фильтрации
     rows_html = []
     for idx, rec in enumerate(records, start=1):
         is_interesting = rec.get('is_interesting', False)
-        category = rec.get('predicted_category', '') or 'Не классифицировано'
-        tr_attrs = f'data-interest="{str(is_interesting).lower()}" data-category="{category}"'
+        cat_raw = rec.get('predicted_category', '')
+        category = (str(cat_raw).strip() if cat_raw and str(cat_raw).strip() else 'Не классифицировано')
+        deeprag_value = rec.get('deep_rag_decision', '')
+        # Экранируем для атрибута data-deeprag
+        deeprag_escaped = str(deeprag_value).replace('"', '&quot;').replace("'", '&#39;')
+        tr_attrs = f'data-interest="{str(is_interesting).lower()}" data-category="{category}" data-deeprag="{deeprag_escaped}"'
         
         cells = [f'<td style="text-align: center; font-weight: bold;">{idx}']
         for key in html_fieldnames:
@@ -583,15 +590,16 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     for i, header_ru in enumerate(headers_ru):
         headers_html += f'<th onclick="sortTable({i+1})" title="{html_fieldnames[i]}">{header_ru}</th>'
 
-    # Блок фильтров с кнопкой экспорта и счётчиком
+    # Блок фильтров — единая группа из 4 кнопок
     filter_buttons_html = f'''
     <div class="filters" style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 15px;">
         <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
             <div>
-                <span style="font-weight: bold;">Интерес:</span>
-                <button id="filter-all" class="filter-btn active">Все</button>
-                <button id="filter-interesting" class="filter-btn">Только интересные</button>
-                <button id="filter-not-interesting" class="filter-btn">Только неинтересные</button>
+                <span style="font-weight: bold;">Фильтр:</span>
+                <button id="filter-all" class="filter-btn main-filter active">Все</button>
+                <button id="filter-interesting" class="filter-btn main-filter">Интересные</button>
+                <button id="filter-not-interesting" class="filter-btn main-filter">Не интересные</button>
+                <button id="filter-deeprag" class="filter-btn main-filter">Подходящие (Глубокий анализ)</button>
             </div>
             <div>
                 <span style="font-weight: bold;">Категория:</span>
@@ -626,7 +634,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         # Fallback на CDN, если скачать при генерации не удалось
         xlsx_script_tag = '<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>'
 
-    # JS для фильтрации, сортировки, счётчика и экспорта
+    # JS для фильтрации, сортировки, счётчика, экспорта и фильтров Deep RAG (включая новый "Подходит")
     js_filter = f'''
     {xlsx_script_tag}
     <script>
@@ -740,17 +748,32 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             }}
         }}
 
+        function getMainFilter() {{
+            if (document.getElementById('filter-interesting').classList.contains('active')) return 'interesting';
+            if (document.getElementById('filter-not-interesting').classList.contains('active')) return 'not-interesting';
+            if (document.getElementById('filter-deeprag').classList.contains('active')) return 'deeprag';
+            return 'all';
+        }}
+
         function applyFilters() {{
-            const interestFilter = document.querySelector('.filter-btn.active')?.id || 'filter-all';
+            const mainFilter = getMainFilter();
             const categoryFilter = document.getElementById('category-filter').value;
+
             const rows = document.querySelectorAll('#dataTable tbody tr');
             let visibleCount = 0;
             rows.forEach(row => {{
                 const interest = row.getAttribute('data-interest') === 'true';
                 const category = row.getAttribute('data-category');
+                const deepragValue = row.getAttribute('data-deeprag') || '';
+
                 let show = true;
-                if (interestFilter === 'filter-interesting' && !interest) show = false;
-                if (interestFilter === 'filter-not-interesting' && interest) show = false;
+                if (mainFilter === 'interesting' && !interest) show = false;
+                if (mainFilter === 'not-interesting' && interest) show = false;
+                if (mainFilter === 'deeprag') {{
+                    const lower = deepragValue.toLowerCase();
+                    const isSuitable = (lower.includes('подходит') && !lower.includes('не подходит')) || lower.includes('на грани');
+                    if (!isSuitable) show = false;
+                }}
                 if (categoryFilter !== 'all' && category !== categoryFilter) show = false;
                 row.style.display = show ? '' : 'none';
                 if (show) visibleCount++;
@@ -759,19 +782,19 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         }}
 
         function updateActiveFiltersDisplay() {{
-            let interestText = '';
-            const interestFilter = document.querySelector('.filter-btn.active')?.id || 'filter-all';
-            if (interestFilter === 'filter-interesting') interestText = 'Только интересные';
-            else if (interestFilter === 'filter-not-interesting') interestText = 'Только неинтересные';
-            else interestText = 'Все';
-            
+            const mainFilter = getMainFilter();
+            const labels = {{
+                'all': null,
+                'interesting': 'Интересные',
+                'not-interesting': 'Не интересные',
+                'deeprag': 'Подходящие (Глубокий анализ)'
+            }};
+
             const categorySelect = document.getElementById('category-filter');
-            let categoryText = categorySelect.options[categorySelect.selectedIndex]?.text || 'Все категории';
-            
             let filtersApplied = [];
-            if (interestFilter !== 'filter-all') filtersApplied.push(`Интерес: ${{interestText}}`);
-            if (categorySelect.value !== 'all') filtersApplied.push(`Категория: ${{categoryText}}`);
-            
+            if (labels[mainFilter]) filtersApplied.push(labels[mainFilter]);
+            if (categorySelect.value !== 'all') filtersApplied.push(`Категория: ${{categorySelect.options[categorySelect.selectedIndex]?.text}}`);
+
             const infoDiv = document.getElementById('active-filters-info');
             if (filtersApplied.length === 0) {{
                 infoDiv.innerHTML = '✅ Фильтры не применены. Показаны все записи.';
@@ -781,16 +804,20 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         }}
 
         function downloadExcel() {{
-            let interestFilter = 'all';
-            if (document.getElementById('filter-interesting').classList.contains('active')) interestFilter = 'interesting';
-            if (document.getElementById('filter-not-interesting').classList.contains('active')) interestFilter = 'not-interesting';
+            try {{
+            const mainFilter = getMainFilter();
             const categoryFilter = document.getElementById('category-filter').value;
 
             const filteredRecords = allRecords.filter(rec => {{
-                const isInteresting = rec.is_interesting === true;
-                if (interestFilter === 'interesting' && !isInteresting) return false;
-                if (interestFilter === 'not-interesting' && isInteresting) return false;
-                const category = rec.predicted_category || 'Не классифицировано';
+                const isInteresting = rec.is_interesting === true || rec.is_interesting === 'true' || rec.is_interesting === 'Да';
+                if (mainFilter === 'interesting' && !isInteresting) return false;
+                if (mainFilter === 'not-interesting' && isInteresting) return false;
+                if (mainFilter === 'deeprag') {{
+                    const decision = (rec.deep_rag_decision || '').toLowerCase();
+                    const isSuitable = (decision.includes('подходит') && !decision.includes('не подходит')) || decision.includes('на грани');
+                    if (!isSuitable) return false;
+                }}
+                const category = (rec.predicted_category && rec.predicted_category.trim()) ? rec.predicted_category.trim() : 'Не классифицировано';
                 if (categoryFilter !== 'all' && category !== categoryFilter) return false;
                 return true;
             }});
@@ -867,6 +894,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             }});
 
             // Строим лист с поддержкой стилей (xlsx-js-style)
+            const MAX_CELL_LEN = 32767;
             const wsData = [];
             const hyperlinkCells = [];
 
@@ -876,6 +904,8 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                     if (cell && typeof cell === 'object' && 'v' in cell) {{
                         wsRow.push(cell.v);
                         hyperlinkCells.push({{ row: rIdx, col: cIdx, url: cell.l.Target }});
+                    }} else if (typeof cell === 'string' && cell.length > MAX_CELL_LEN) {{
+                        wsRow.push(cell.slice(0, MAX_CELL_LEN));
                     }} else {{
                         wsRow.push(cell);
                     }}
@@ -913,32 +943,29 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             document.body.appendChild(a);
             a.click();
             setTimeout(() => {{ document.body.removeChild(a); URL.revokeObjectURL(dlUrl); }}, 100);
+            }} catch(e) {{
+                alert('Ошибка при создании Excel-файла: ' + e.message + '\\nПроверьте, что библиотека XLSX загружена (нужен интернет при первом открытии).');
+                console.error('downloadExcel error:', e);
+            }}
         }}
 
-        document.getElementById('filter-all').addEventListener('click', function() {{
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            this.classList.add('active');
-            applyFilters();
-            updateActiveFiltersDisplay();
+        // Единый обработчик для группы из 4 фильтров
+        document.querySelectorAll('.main-filter').forEach(btn => {{
+            btn.addEventListener('click', function() {{
+                document.querySelectorAll('.main-filter').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                applyFilters();
+                updateActiveFiltersDisplay();
+            }});
         }});
-        document.getElementById('filter-interesting').addEventListener('click', function() {{
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            this.classList.add('active');
-            applyFilters();
-            updateActiveFiltersDisplay();
-        }});
-        document.getElementById('filter-not-interesting').addEventListener('click', function() {{
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            this.classList.add('active');
-            applyFilters();
-            updateActiveFiltersDisplay();
-        }});
+
         document.getElementById('category-filter').addEventListener('change', function() {{
             applyFilters();
             updateActiveFiltersDisplay();
         }});
         document.getElementById('reset-filters').addEventListener('click', function() {{
-            document.getElementById('filter-all').click();
+            document.querySelectorAll('.main-filter').forEach(b => b.classList.remove('active'));
+            document.getElementById('filter-all').classList.add('active');
             document.getElementById('category-filter').value = 'all';
             applyFilters();
             updateActiveFiltersDisplay();
@@ -1105,7 +1132,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
     <div class="table-container">
         <table id="dataTable">
             <thead>
-                <tr>{headers_html}<tr>
+                <tr>{headers_html}</tr>
             </thead>
             <tbody>
                 {''.join(rows_html)}
@@ -1128,10 +1155,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_html = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.html")
-    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260407_181237.jsonl")
+    generate_html_table(EXTRACTED_TEXT_FOLDER, output_html, jsonl_filename="all_tenders_data_20260411_161404.jsonl")
     
     output_excel = os.path.join(EXTRACTED_TEXT_FOLDER, "tenders_summary.xlsx")
-    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260407_181237.jsonl")
+    generate_excel_table(EXTRACTED_TEXT_FOLDER, output_excel, jsonl_filename="all_tenders_data_20260411_161404.jsonl")
 
     print(f"HTML таблица сгенерирована: {output_html}")
     print(f"Excel таблица сгенерирована: {output_excel}")
