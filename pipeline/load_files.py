@@ -14,7 +14,8 @@ from asyncio import Semaphore
 try:
     import rarfile
     RARFILE_AVAILABLE = True
-    rarfile.UNRAR_TOOL = r"C:\Program Files\WinRAR\UnRAR.exe"
+    # На macOS unrar ставится через: brew install unrar
+    # rarfile сам найдёт его в PATH; явный путь не нужен
 except ImportError:
     rarfile = None
     RARFILE_AVAILABLE = False
@@ -34,6 +35,53 @@ logger = logging.getLogger(__name__)
 
 # Расширения архивов, которые мы умеем распаковывать
 ARCHIVE_EXTS = {'.zip', '.rar', '.7z'}
+
+try:
+    import mammoth
+    MAMMOTH_AVAILABLE = True
+except ImportError:
+    mammoth = None
+    MAMMOTH_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "mammoth не установлен, конвертация .doc -> .txt отключена. "
+        "Установите: pip install mammoth"
+    )
+
+
+async def convert_doc_to_txt(doc_path: str) -> Optional[str]:
+    """
+    Конвертирует .doc-файл в .txt с помощью mammoth.
+    Возвращает путь к новому .txt-файлу или None при ошибке.
+
+    Зависимость: pip install mammoth
+    Ограничение: форматирование не сохраняется, только plain text.
+    """
+    if not MAMMOTH_AVAILABLE:
+        logger.error(f"mammoth не установлен, конвертация пропущена: {doc_path}")
+        return None
+
+    txt_path = os.path.splitext(doc_path)[0] + ".txt"
+
+    try:
+        # mammoth синхронный — запускаем в пуле потоков, чтобы не блокировать event loop
+        def _convert():
+            with open(doc_path, "rb") as f:
+                result = mammoth.extract_raw_text(f)
+            for msg in result.messages:
+                logger.debug(f"mammoth [{os.path.basename(doc_path)}]: {msg}")
+            return result.value
+
+        text = await asyncio.to_thread(_convert)
+
+        async with aiofiles.open(txt_path, "w", encoding="utf-8") as f:
+            await f.write(text)
+
+        logger.debug(f"Конвертирован .doc -> .txt: {txt_path}")
+        return txt_path
+
+    except Exception as e:
+        logger.exception(f"Ошибка при конвертации {doc_path}: {e}")
+        return None
 
 async def extract_archive_if_needed(archive_path: str):
     """
@@ -101,7 +149,7 @@ async def extract_archive_if_needed(archive_path: str):
                 extracted_count = len(sz.getnames()) if hasattr(sz, 'getnames') else 0
             logger.debug(f"Распакован 7z-архив {archive_path} -> {target_dir} ({extracted_count} файлов)")
 
-        # --- Рекурсивная обработка вложенных архивов ---
+        # --- Рекурсивная обработка вложенных архивов и .doc файлов ---
         for root, dirs, files in os.walk(target_dir):
             for file in files:
                 file_path = os.path.join(root, file)
@@ -110,6 +158,14 @@ async def extract_archive_if_needed(archive_path: str):
                     nested_count = await extract_archive_if_needed(file_path)
                     if nested_count > 0:
                         extracted_count += nested_count
+                elif file_ext == '.doc':
+                    txt_path = await convert_doc_to_txt(file_path)
+                    if txt_path:
+                        try:
+                            os.remove(file_path)
+                            logger.debug(f"Удалён .doc из архива после конвертации: {file_path}")
+                        except OSError as e:
+                            logger.warning(f"Не удалось удалить .doc из архива {file_path}: {e}")
         # -------------------------------------------------
 
     except Exception as e:
@@ -251,6 +307,7 @@ async def download_tender_files_async(
         f"найдено файлов: {stats['total_files_found']}, "
         f"скачано: {stats['downloaded_files']}, "
         f"пропущено (уже есть): {stats['skipped_files']}, "
+        f"конвертировано .doc -> .txt: {stats.get('converted_doc_to_txt', 0)}, "
         f"распаковано архивов: {stats['extracted_archives']}, "
         f"извлечено файлов из архивов: {stats['extracted_files']}, "
         f"ошибок: {len(stats['errors'])}"
@@ -287,6 +344,18 @@ async def _download_file(
                 file_path = new_path
 
             stats["downloaded_files"] += 1
+
+            # Конвертируем .doc -> .docx через LibreOffice (без доп. зависимостей)
+            if os.path.splitext(file_path)[1].lower() == '.doc':
+                txt_path = await convert_doc_to_txt(file_path)
+                if txt_path:
+                    stats.setdefault("converted_doc_to_txt", 0)
+                    stats["converted_doc_to_txt"] += 1
+                    try:
+                        os.remove(file_path)
+                        logger.debug(f"Удалён исходный .doc после конвертации: {file_path}")
+                    except OSError as e:
+                        logger.warning(f"Не удалось удалить исходный .doc {file_path}: {e}")
 
             # Проверяем, является ли файл архивом, и распаковываем
             extracted = await extract_archive_if_needed(file_path)

@@ -29,6 +29,7 @@ pdfplumber>=0.10.0                 # извлечение таблиц из PDF 
  
 # --- Word / DOCX ---
 python-docx>=0.8.11
+mammoth>=1.6.0                     # конвертация .doc -> plain text
  
 # --- Архивы ---
 rarfile>=4.1                       # распаковка .rar (требует unrar в системе)
