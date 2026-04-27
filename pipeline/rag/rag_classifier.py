@@ -15,6 +15,11 @@ import torch
 from typing import List, Dict, Any, Optional, Tuple
 from config import RAG_LLM_CONFIG
 
+try:
+    from config import CATEGORY_INTEREST_THRESHOLDS
+except ImportError:  # pragma: no cover — на случай старого config.py
+    CATEGORY_INTEREST_THRESHOLDS = {}
+
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -224,8 +229,20 @@ class TenderClassifierRAG:
             logger.info("Загрузка данных из кэша %s", self.data_cache_path)
             with open(self.data_cache_path, 'rb') as f:
                 df = pickle.load(f)
-            logger.info("Данные загружены из кэша: %d записей", len(df))
-            return df
+            # Защита от устаревшего кэша: если нет колонки interest_label —
+            # схема изменилась, пересобираем эмбеддинги/индекс с нуля.
+            if 'interest_label' not in df.columns:
+                logger.warning(
+                    "Кэш устарел (нет колонки 'interest_label'). Пересобираем кэш и эмбеддинги."
+                )
+                for p in (self.embeddings_path, self.index_path, self.data_cache_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            else:
+                logger.info("Данные загружены из кэша: %d записей", len(df))
+                return df
 
         logger.info("Кэш данных не найден или неполный, загружаем из Excel...")
         df = self._load_and_prepare_data()
@@ -275,13 +292,50 @@ class TenderClassifierRAG:
         df = df[df['text'] != ''].reset_index(drop=True)
 
         # Категории: поддерживаем несколько возможных имён колонок
-        category_cols = ['Работы', 'Категория', 'Category', 'D']
+        # 'Профиль' добавлен для отчётов вида «Отчет для ИИ DD.MM.YYYY.xlsx»
+        category_cols = ['Работы', 'Категория', 'Профиль', 'Category', 'D']
         cat_col = first_existing(category_cols)
         if not cat_col:
             logger.warning(f"В файле {source_name} не найдена колонка с категорией. Все объекты будут помечены как 'Не профиль'.")
             df['category'] = 'Не профиль'
         else:
-            df['category'] = df[cat_col].fillna('Не профиль')
+            df['category'] = df[cat_col].fillna('Не профиль').astype(str).str.strip()
+            # Унифицируем регистр для известных категорий «тепло»/«газ» (в отчётах
+            # пишут с маленькой буквы, в обучающих файлах — с большой).
+            cat_canonical = {
+                'тепло': 'Тепло',
+                'газ': 'Газ',
+                'не профиль': 'Не профиль',
+                'освещение': 'Освещение',
+                'работы': 'Работы',
+            }
+            df['category'] = df['category'].apply(
+                lambda c: cat_canonical.get(c.lower(), c) if isinstance(c, str) else 'Не профиль'
+            )
+
+        # Интерес-метка: если файл содержит колонку «Действие», то непустое
+        # значение = «человек взял в работу» (interest_label=1), пустое = 0.
+        # Если колонки нет — это старые обучающие файлы, в них считаем что
+        # любая профильная категория = интерес 1, «Не профиль» = 0.
+        action_cols = ['Действие', 'Action', 'Решение']
+        action_col = first_existing(action_cols)
+        if action_col:
+            df['interest_label'] = df[action_col].fillna('').astype(str).str.strip().apply(
+                lambda v: 1.0 if v else 0.0
+            )
+            n_pos = int(df['interest_label'].sum())
+            logger.info(
+                "Файл %s: колонка интереса '%s', положительных меток: %d из %d",
+                source_name, action_col, n_pos, len(df)
+            )
+        else:
+            df['interest_label'] = df['category'].apply(
+                lambda c: 0.0 if str(c).strip().lower() == 'не профиль' else 1.0
+            )
+            logger.info(
+                "Файл %s: колонки 'Действие' нет, interest_label=1 для всех профильных, 0 для 'Не профиль'.",
+                source_name
+            )
 
         df['source_file'] = source_name
 
@@ -389,15 +443,61 @@ class TenderClassifierRAG:
         similarities = similarities[0]
         indices = indices[0]
 
+        # interest_label может отсутствовать в очень старом кэше — подстрахуемся
+        has_interest = 'interest_label' in self.df.columns
+
         similar = []
         for sim, idx in zip(similarities, indices):
+            row = self.df.iloc[idx]
             similar.append({
-                'text': self.df.iloc[idx]['text'][:500],
-                'category': self.df.iloc[idx]['category'],
+                'text': row['text'][:500],
+                'category': row['category'],
                 'similarity': float(sim),
-                'index': int(idx)                       # добавили индекс
+                'index': int(idx),
+                'interest_label': float(row['interest_label']) if has_interest else 1.0,
             })
         return similar
+
+    def _compute_interest_signal(self, similar: List[Dict]) -> float:
+        """
+        Считает RAG-сигнал интереса как взвешенное среднее меток `interest_label`
+        ближайших соседей. Веса = относительные сходства, нормированные так,
+        чтобы сумма равнялась 1. Возвращает число в [0, 1].
+        """
+        if not similar:
+            return 0.0
+        # Используем только реально похожие соседи (sim > 0). Если всё ниже нуля —
+        # сигнала нет, возвращаем 0.
+        positive = [s for s in similar if s['similarity'] > 0]
+        if not positive:
+            return 0.0
+        total_sim = sum(s['similarity'] for s in positive)
+        if total_sim <= 0:
+            return 0.0
+        score = sum(s['similarity'] * s.get('interest_label', 0.0) for s in positive) / total_sim
+        return max(0.0, min(1.0, float(score)))
+
+    def _resolve_interest_threshold(self, category: str) -> float:
+        """Возвращает порог is_interesting для конкретной категории.
+
+        Если в config.CATEGORY_INTEREST_THRESHOLDS есть запись — используем её.
+        Иначе — общий self.interest_threshold (обратная совместимость)."""
+        if not category:
+            return self.interest_threshold
+        # Пробуем точное совпадение и canonical-варианты
+        cat_variants = [category, category.strip(), category.strip().lower()]
+        for variant in cat_variants:
+            if variant in CATEGORY_INTEREST_THRESHOLDS:
+                return float(CATEGORY_INTEREST_THRESHOLDS[variant])
+        # canonical-варианты для устаревших регистров
+        canon = category.strip().lower()
+        canonical_map = {
+            'тепло': 'Тепло', 'газ': 'Газ', 'не профиль': 'Не профиль',
+            'освещение': 'Освещение', 'работы': 'Работы',
+        }
+        if canon in canonical_map and canonical_map[canon] in CATEGORY_INTEREST_THRESHOLDS:
+            return float(CATEGORY_INTEREST_THRESHOLDS[canonical_map[canon]])
+        return self.interest_threshold
 
     def _fallback_vote(self, similar: List[Dict]) -> Tuple[str, float]:
         """Взвешенное голосование с учётом близости к центроиду и весов категорий."""
@@ -478,7 +578,8 @@ class TenderClassifierRAG:
             full_text = self.embedder.tokenizer.convert_tokens_to_string(tokens)
         return full_text
 
-    async def _call_llm_async(self, tender_text: str, similar: List[Dict], max_retries: int = 2, low_confidence_mode: bool = False):
+    async def _call_llm_async(self, tender_text: str, similar: List[Dict], max_retries: int = 2,
+                              low_confidence_mode: bool = False, rag_interest_signal: float = 0.0):
         """Асинхронная версия вызова LLM."""
         company_context = self._load_company_context()
         company_context_block = f"""
@@ -486,15 +587,59 @@ class TenderClassifierRAG:
     {company_context}
     """ if company_context else ""
 
-        # Формируем примеры из похожих тендеров
+        # Формируем примеры из похожих тендеров — теперь с меткой интереса (если есть)
         examples = []
         for i, t in enumerate(similar, 1):
+            interest_mark = ""
+            if 'interest_label' in t:
+                interest_mark = (" [ВЗЯТО В РАБОТУ человеком]" if t['interest_label'] >= 0.5
+                                  else " [НЕ взято в работу]")
             examples.append(
-                f"Пример {i} (сходство: {t['similarity']:.3f}):\n"
+                f"Пример {i} (сходство: {t['similarity']:.3f}){interest_mark}:\n"
                 f"Текст: {t['text']}\n"
                 f"Категория: {t['category']}"
             )
         examples_text = "\n\n".join(examples)
+
+        # Few-shot из реальной разметки людей — чёткие положительные/отрицательные сигналы
+        few_shot_examples = """
+ПРИМЕРЫ РЕШЕНИЙ ЛЮДЕЙ (эталон):
+
+[ВЗЯТЬ] "Поставка приборов учета электроэнергии с поддержкой АСКУЭ" → category=Технологии (или GSM/485/...), interest_score=0.90
+[ВЗЯТЬ] "Поставка счетчиков электроэнергии трехфазных" с заводом «Энергомера»/«Миртек» → category=Технологии, interest_score=0.85
+[ВЗЯТЬ] "Установка освещения на автомобильной дороге … км N+M – км N+K" → category=Освещение, interest_score=0.85
+[ВЗЯТЬ] "Капитальный ремонт сетей наружного освещения" / "Содержание и ремонт сетей наружного освещения" → Освещение, 0.80
+[ВЗЯТЬ] "Архитектурно-художественное освещение здания" → Освещение, 0.80
+[ВЗЯТЬ] "Установка/замена приборов учета электрической энергии (522-ФЗ)" → Работы, 0.85
+[ВЗЯТЬ] "Выполнение работ по обслуживанию ИСУЭ / АИИСКУЭ / АСКУЭ" → Работы, 0.80
+[ВЗЯТЬ] "Поставка пунктов коммерческого учета (СЭ)" → Технологии, 0.85
+[ВЗЯТЬ] "Высоковольтные счетчики, АСУЭ, договоры техприсоединения" → Технологии, 0.90
+
+[НЕ БРАТЬ] "Поставка счётчика воды (без интерфейса связи)" → Не профиль (или Вода. Простые ПУ, interest=0.10)
+[НЕ БРАТЬ] "Теплосчетчик / Поставка прибора учёта тепловой энергии" без АСКУЭ/интерфейса → Тепло, interest=0.10
+[НЕ БРАТЬ] "Поставка газового счётчика" без интерфейсов и телеметрии → Газ, interest=0.10
+[НЕ БРАТЬ] "Поверка / техническое обслуживание узла учёта" без поставки/замены ПУ → Не профиль
+[НЕ БРАТЬ] "Освещение помещений (склад, кабинет, школа)" — комнатное/внутреннее освещение → Не профиль
+[НЕ БРАТЬ] "Поставка светофоров/видеонаблюдения/СКУД" → Не профиль
+[НЕ БРАТЬ] "Поставка МАФ" / общестроительные работы без учёта → Не профиль
+
+ПРАВИЛО: простой счётчик воды/тепла/газа БЕЗ интерфейсов передачи данных и без слов «АСКУЭ/АСУЭ/АИИС/телеметрия/диспетчеризация/умный/удалённый сбор» — это interest_score ≤ 0.20, даже если категория не «Не профиль». Освещение помещений (а не уличное/наружное/архитектурное/дорожное) — interest_score ≤ 0.20.
+"""
+
+        rag_signal_block = ""
+        if rag_interest_signal is not None:
+            if rag_interest_signal >= 0.7:
+                rag_signal_block = f"""
+RAG-СИГНАЛ ИНТЕРЕСА: {rag_interest_signal:.2f} — похожие тендеры в эталонной разметке людей чаще всего БРАЛИ В РАБОТУ. Это сильное указание поднять interest_score, если только в тексте нет очевидного «Не профиль».
+"""
+            elif rag_interest_signal <= 0.2:
+                rag_signal_block = f"""
+RAG-СИГНАЛ ИНТЕРЕСА: {rag_interest_signal:.2f} — похожие тендеры в эталоне людей в основном НЕ БРАЛИ В РАБОТУ. Не завышай interest_score, если нет явных приоритетных признаков (LoRaWAN, АСКУЭ, поставка ПУ с интерфейсом, уличное освещение и т.п.).
+"""
+            else:
+                rag_signal_block = f"""
+RAG-СИГНАЛ ИНТЕРЕСА: {rag_interest_signal:.2f} — нейтральный сигнал. Опирайся на сам текст и правила.
+"""
 
         categories_str = ", ".join(self.all_categories)
 
@@ -505,7 +650,7 @@ class TenderClassifierRAG:
         base_prompt = f"""Ты — классификатор тендеров. Твоя задача — определить категорию и оценить интерес тендера для компании.
 {low_conf_note}
 {company_context_block}
-
+{rag_signal_block}
 ═══════════════════════════════════════
 ЧЁТКИЕ ПРИЗНАКИ "Не профиль" (только при явном наличии В ТЕКСТЕ):
 - Исключительно поверка приборов учёта — и больше ничего (без поставки, монтажа или замены)
@@ -513,14 +658,28 @@ class TenderClassifierRAG:
 - Исключительно проектирование / изыскания — без поставки или монтажа приборов учёта
 - Только общестроительные работы, не связанные с учётом ресурсов (вода, э/э, тепло, газ)
 - Оборудование явно не связано с учётом ресурсов (светофоры, видеонаблюдение, СКУД, пожарная сигнализация и т.п.)
+- Освещение ПОМЕЩЕНИЙ (внутреннее: кабинеты, школы, склады) без признаков уличного/наружного/архитектурного/дорожного освещения
 
 ВАЖНО: если тендер содержит хотя бы ОДИН из перечисленных элементов профиля В ДОПОЛНЕНИЕ к непрофильным работам — это НЕ "Не профиль". При сомнении — выбирай профильную категорию с низким interest_score (0.2–0.4), а не "Не профиль".
+
+КОГДА interest_score ДОЛЖЕН БЫТЬ НИЗКИМ (≤ 0.20), даже при профильной категории:
+- Простой счётчик воды/тепла/газа без интерфейсов передачи данных и без АСКУЭ/телеметрии/диспетчеризации/удалённого сбора
+- Освещение помещений / внутреннее освещение
+- Только поверка / только обслуживание / только проектирование
+
+КОГДА interest_score ДОЛЖЕН БЫТЬ ВЫСОКИМ (≥ 0.80):
+- Любая технология передачи данных при поставке/работах с ПУ (LoRaWAN, GSM, NB-IoT, NB-FI, RF, PLC, RS-485, 485)
+- Поставка приборов учёта электроэнергии с интерфейсами / АСКУЭ / умных счётчиков
+- Уличное / наружное / дорожное / архитектурно-художественное освещение (особенно с конкретными светильниками или ремонтом сетей наружного освещения)
+- Работы по 522-ФЗ / АИИСКУЭ / АСКУЭ / АСУЭ / ИСУЭ / системам учёта электроэнергии с удалённым сбором
 ═══════════════════════════════════════
+
+{few_shot_examples}
 
 ДОПУСТИМЫЕ КАТЕГОРИИ (только из этого списка):
 {categories_str}
 
-ПОХОЖИЕ ТЕНДЕРЫ ИЗ БАЗЫ (для ориентира):
+ПОХОЖИЕ ТЕНДЕРЫ ИЗ БАЗЫ (для ориентира, метка [ВЗЯТО В РАБОТУ] = эталонное решение людей):
 {examples_text}
 
 НОВЫЙ ТЕНДЕР:
@@ -557,7 +716,7 @@ JSON:"""
         strict_prompt = f"""Ты — классификатор тендеров.
 {low_conf_note}
 {company_context_block}
-
+{rag_signal_block}
 Признаки "Не профиль" (только при явном наличии в тексте и отсутствии профильных элементов):
 - Только поверка ПУ (без поставки / монтажа / замены)
 - Только ТО / ремонт существующего оборудования
@@ -602,7 +761,10 @@ JSON:"""
             interest_score = max(0.0, min(1.0, interest_score))
             interest_reasoning = result_obj.get('interest_reasoning', '')
             if category in self.all_categories:
-                return category, confidence, reasoning, interest_score >= self.interest_threshold, interest_score, interest_reasoning
+                # Покатегорийный порог: для технологий он мягкий, для тепла/газа жёсткий
+                threshold = self._resolve_interest_threshold(category)
+                is_int = interest_score >= threshold
+                return category, confidence, reasoning, is_int, interest_score, interest_reasoning
         # Если не удалось
         return "Не профиль(ошибка_llm)", 0.0, "LLM не выбрала категорию", False, 0.0, "Ошибка"
 
@@ -656,6 +818,11 @@ JSON:"""
         similar = self._find_similar(tender_text)
         max_sim = max([item['similarity'] for item in similar]) if similar else 0.0
 
+        # RAG-сигнал интереса по эталонной разметке людей (взвешенное среднее
+        # interest_label соседей). Используется и в LLM-промпте, и в финальной
+        # коррекции interest_score.
+        rag_interest_signal = self._compute_interest_signal(similar)
+
         # Жёсткий порог снижен: очень слабые совпадения отсекаем,
         # всё остальное отправляем к LLM (даже при низком сходстве)
         hard_cutoff = self.faiss_threshold * 0.6  # ~0.06 при дефолтном 0.10
@@ -670,6 +837,7 @@ JSON:"""
                 'is_interesting': False,
                 'interest_score': 0.0,
                 'interest_reasoning': 'Нет совпадений с обучающей базой.',
+                'rag_interest_signal': rag_interest_signal,
             }
 
         # Если сходство между hard_cutoff и faiss_threshold — помечаем как "слабый сигнал"
@@ -678,7 +846,9 @@ JSON:"""
 
         fb_cat, fb_conf = self._fallback_vote(similar)
         llm_cat, llm_conf, llm_reason, llm_interesting, llm_interest_score, llm_interest_reason = await self._call_llm_async(
-            tender_text, similar, low_confidence_mode=low_confidence_mode
+            tender_text, similar,
+            low_confidence_mode=low_confidence_mode,
+            rag_interest_signal=rag_interest_signal,
         )
 
         final_cat, final_conf, final_reason, final_interesting, final_interest_score, final_interest_reason = self._combine_predictions(
@@ -688,9 +858,34 @@ JSON:"""
             similar
         )
 
+        # ── Финальная коррекция interest_score по RAG-сигналу ───────────────
+        # Если эталонные соседи единодушны, мягко тянем оценку LLM в их сторону.
+        # При сильном сигнале «не брали» — резко режем (50/50 веса). Это снижает
+        # завышение score на «простых ПУ воды/тепла/газа», где LLM любит
+        # ставить 0.5–0.6, хотя люди такие тендеры не берут.
+        adjusted_interest = final_interest_score
+        if rag_interest_signal >= 0.85 and final_interest_score < 0.7:
+            # Сильный позитивный сигнал — тянем вверх
+            adjusted_interest = max(final_interest_score, 0.5 * final_interest_score + 0.5 * rag_interest_signal)
+            final_interest_reason = (final_interest_reason + f" [RAG-сигнал {rag_interest_signal:.2f} → подняли interest_score]").strip()
+        elif rag_interest_signal <= 0.15 and final_interest_score > 0.25:
+            # Сильный негативный сигнал — режем (60% веса от соседей)
+            adjusted_interest = 0.4 * final_interest_score + 0.6 * rag_interest_signal
+            final_interest_reason = (final_interest_reason + f" [RAG-сигнал {rag_interest_signal:.2f} → понизили interest_score]").strip()
+
+        adjusted_interest = max(0.0, min(1.0, adjusted_interest))
+        final_interest_score = adjusted_interest
+
+        # Применяем покатегорийный порог к итоговому interest_score
+        threshold = self._resolve_interest_threshold(final_cat)
+        final_interesting = final_interest_score >= threshold
+
         if final_cat in self.tech_categories:
             final_reason += f" (категория обобщена до 'Технологии', исходно: {final_cat})"
             final_cat = "Технологии"
+            # Для «Технологии» — мягкий порог
+            threshold_after_unify = self._resolve_interest_threshold("Технологии")
+            final_interesting = final_interest_score >= threshold_after_unify
 
         return {
             'text': tender_text,
@@ -707,6 +902,7 @@ JSON:"""
             'interest_score': final_interest_score,
             'is_interesting': final_interesting,
             'interest_reasoning': final_interest_reason,
+            'rag_interest_signal': rag_interest_signal,
         }
 
     async def process_file_async(self, input_jsonl: str, output_jsonl: str, concurrency: int = 5):
@@ -739,7 +935,8 @@ JSON:"""
                         'reasoning': result['reasoning'],
                         'interest_score': result['interest_score'],
                         'is_interesting': result['is_interesting'],
-                        'interest_reasoning': result['interest_reasoning']
+                        'interest_reasoning': result['interest_reasoning'],
+                        'rag_interest_signal': result.get('rag_interest_signal', 0.0),
                     })
                 except Exception as e:
                     logger.error(f"Строка {line_num}: ошибка классификации: {e}")

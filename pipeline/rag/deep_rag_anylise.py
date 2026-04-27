@@ -60,8 +60,14 @@ from config import (
     QUERY_EXPANSION,
     HIGH_PRIORITY_KEYWORDS,
     MEDIUM_PRIORITY_KEYWORDS,
-    LOW_PRIORITY_KEYWORDS
+    LOW_PRIORITY_KEYWORDS,
 )
+
+try:
+    from config import WORKS_PU_TRIGGERS, OUTDOOR_LIGHTING_TRIGGERS
+except ImportError:  # pragma: no cover
+    WORKS_PU_TRIGGERS = []
+    OUTDOOR_LIGHTING_TRIGGERS = []
 
 logger = logging.getLogger(__name__)
 
@@ -657,40 +663,47 @@ class TenderRAGAnalyzer:
 - direction: направление тендера — одно из: "Вода", "Тепло", "Газ", "Электроэнергия", "Высоковольтные ПУ", "Работы", "Освещение", "не определено"
 - has_pu_supply: есть ли явное требование к ПОСТАВКЕ приборов учёта — true/false
 - found_technologies: список технологий передачи данных, ДОСЛОВНО упомянутых в тексте. Если ни одной — пустой список []. Не додумывай — только то, что написано.
-- has_smart_metering: есть ли явные слова "умный счетчик", "интеллектуальный ПУ", "АСКУЭ", "АСУЭ", "АИИС КУЭ", "автоматизированный сбор", "удаленный съем" — true/false
+- has_smart_metering: есть ли явные слова "умный счетчик", "интеллектуальный ПУ", "АСКУЭ", "АСУЭ", "АИИС КУЭ", "АИИСКУЭ", "ИСУЭ", "автоматизированный сбор", "удаленный съем", "удалённый сбор данных" — true/false
 - only_service: тендер ТОЛЬКО на обслуживание/поверку/ремонт существующих ПУ без поставки новых — true/false
 - only_design: тендер ТОЛЬКО на проектирование/изыскания без поставки и монтажа ПУ — true/false
+- is_outdoor_lighting: освещение является УЛИЧНЫМ / НАРУЖНЫМ / ДОРОЖНЫМ / АРХИТЕКТУРНО-ХУДОЖЕСТВЕННЫМ (не освещение помещений). Признаки: «уличное», «наружное», «придорожное», «автомобильная дорога», «опора освещения», «сети наружного освещения», «архитектурно-художественное», «АХО». true/false. Если direction != "Освещение" — false.
+- has_works_pu_trigger: упомянуты ли в документации триггеры работ по системам учёта электроэнергии — 522-ФЗ, ФЗ-522, АИИСКУЭ, АИИС КУЭ, АСКУЭ, АСУЭ, ИСУЭ, ИСУ, «пункт коммерческого учёта», «точки учёта», «граница балансовой принадлежности», «система учёта электроэнергии», «удалённый сбор данных», «установка/замена приборов учёта электроэнергии». true/false
 - customer: заказчик (строка или null)
 - key_facts: список из 2–5 дословных коротких цитат или точных фактов из документации, которые определили решение (например: ["поставка счётчиков воды Ду15", "технология LoRaWAN не упомянута", "только поверка приборов учёта"])
 
 ШАГ 2. ПРИНЯТИЕ РЕШЕНИЯ (по жёстким правилам, без исключений)
 
 ПРАВИЛО C (проверяй ПЕРВЫМ) → "Не подходит" (score 0.05–0.15):
-  - only_service == true  (только обслуживание/поверка/ремонт — нет поставки/замены)
-  - only_design == true   (только проектирование без поставки и монтажа ПУ)
-  - direction == "Освещение"
-  - direction == "не определено" И has_pu_supply == false И found_technologies пустой
-  - direction == "Работы" И has_smart_metering == false И found_technologies пустой И has_pu_supply == false
-  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false И direction не в ["Вода","Тепло","Газ","Электроэнергия","Высоковольтные ПУ"]
+  - only_service == true  (только обслуживание/поверка/ремонт — нет поставки/замены), И has_works_pu_trigger == false, И КАТЕГОРИЯ != "Технологии"
+  - only_design == true   (только проектирование без поставки и монтажа ПУ), И has_works_pu_trigger == false
+  - direction == "Освещение" И is_outdoor_lighting == false (внутреннее освещение помещений)
+  - direction == "Тепло" И found_technologies пустой И has_smart_metering == false (простая поставка теплосчётчика без интерфейсов)
+  - direction == "Газ"  И found_technologies пустой И has_smart_metering == false (простая поставка газового счётчика)
+  - direction == "Вода" И found_technologies пустой И has_smart_metering == false И КАТЕГОРИЯ != "Технологии" (простой счётчик воды)
+  - direction == "не определено" И has_pu_supply == false И found_technologies пустой И has_works_pu_trigger == false
+  - direction == "Работы" И has_smart_metering == false И found_technologies пустой И has_pu_supply == false И has_works_pu_trigger == false
+  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false И has_works_pu_trigger == false И direction не в ["Электроэнергия","Высоковольтные ПУ"]
 
 ПРАВИЛО A → "Подходит" (score 0.82–0.92):
   Применяется ТОЛЬКО если правило C не сработало. Хотя бы одно из:
+  - КАТЕГОРИЯ ТЕНДЕРА == "Технологии" (любой dirаction): автоматически «Подходит» — наш профиль 100%
   - found_technologies содержит "LoRaWAN"
-  - direction == "Вода" И has_pu_supply == true И (found_technologies непустой ИЛИ has_smart_metering == true)
   - has_smart_metering == true И has_pu_supply == true
-  - direction == "Электроэнергия" И found_technologies содержит хотя бы одно из [GSM, NB-IoT, PLC, RF, RS-485] И has_pu_supply == true
-  - КАТЕГОРИЯ ТЕНДЕРА == "Технологии" И direction == "Электроэнергия" И found_technologies содержит хотя бы одно из [GSM, NB-IoT, PLC, RF, RS-485, LoRaWAN] И has_smart_metering == true
+  - direction == "Электроэнергия" И found_technologies содержит хотя бы одно из [GSM, NB-IoT, PLC, RF, RS-485, 485, LoRaWAN, NB-FI] И has_pu_supply == true
+  - direction == "Работы" И has_works_pu_trigger == true (работы по 522-ФЗ / АИИСКУЭ / ИСУЭ / системам учёта э/э)
+  - direction == "Освещение" И is_outdoor_lighting == true И в key_facts/документации есть конкретные светильники, опоры, бренды или явное «сеть наружного освещения / уличное / дорожное»
 
 ПРАВИЛО B → "На грани" (score 0.42–0.58):
   Применяется ТОЛЬКО если не сработали ни C, ни A. Хотя бы одно из:
-  - direction в ["Тепло", "Газ"] И has_pu_supply == true
   - direction == "Высоковольтные ПУ" И has_pu_supply == true
+  - direction == "Освещение" И is_outdoor_lighting == true (без явных светильников/брендов — мягкая оценка)
+  - direction == "Работы" И (has_smart_metering == true ИЛИ found_technologies непустой) (без явных триггеров 522-ФЗ)
   - found_technologies непустой И has_pu_supply == true И direction не попадает под A
-  - КАТЕГОРИЯ ТЕНДЕРА == "Технологии" И found_technologies непустой И has_smart_metering == true (даже без явной поставки ПУ)
+  - direction в ["Тепло","Газ","Вода"] И (found_technologies непустой ИЛИ has_smart_metering == true) (поставка с признаками умного учёта/интерфейсов — берём «На грани» для аналитики)
 
   ВАЖНО: "На грани" запрещено если:
-  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false → это всегда "Не подходит"
-  - direction в ["Тепло","Газ"] И has_pu_supply == false → "Не подходит"
+  - has_pu_supply == false И found_technologies пустой И has_smart_metering == false → "Не подходит"
+  - direction в ["Тепло","Газ","Вода"] И found_technologies пустой И has_smart_metering == false → "Не подходит" (простой счётчик без интерфейсов — не наш кейс по факту)
 
 ШАГ 3. ФОРМИРОВАНИЕ reasoning
 Подробное обоснование — 3–5 предложений. Обязательно включи:
@@ -712,6 +725,8 @@ class TenderRAGAnalyzer:
   "has_smart_metering": true/false,
   "only_service": true/false,
   "only_design": true/false,
+  "is_outdoor_lighting": true/false,
+  "has_works_pu_trigger": true/false,
   "customer": "..." или null,
   "key_facts": ["...", "..."],
   "suitability_score": число,
@@ -753,7 +768,26 @@ JSON:"""
         has_smart_metering = bool(parsed.get("has_smart_metering", False))
         only_service = bool(parsed.get("only_service", False))
         only_design = bool(parsed.get("only_design", False))
+        is_outdoor_lighting = bool(parsed.get("is_outdoor_lighting", False))
+        has_works_pu_trigger = bool(parsed.get("has_works_pu_trigger", False))
         key_facts = parsed.get("key_facts", [])
+
+        # ── Детерминированный обход триггеров по тексту контекста ──────────
+        # LLM может не пометить has_works_pu_trigger / is_outdoor_lighting,
+        # хотя ключевые слова явно есть. Подтверждаем флаги по сырому тексту
+        # фрагментов документации.
+        ctx_lower = context.lower() if context else ""
+        if not has_works_pu_trigger and WORKS_PU_TRIGGERS:
+            has_works_pu_trigger = any(t in ctx_lower for t in WORKS_PU_TRIGGERS)
+        if direction == "Освещение" and not is_outdoor_lighting and OUTDOOR_LIGHTING_TRIGGERS:
+            is_outdoor_lighting = any(t in ctx_lower for t in OUTDOOR_LIGHTING_TRIGGERS)
+        # АСКУЭ/АИИСКУЭ/ИСУЭ — частые слова, насильно проставим has_smart_metering
+        smart_keywords = ("аскуэ", "асуэ", "аиискуэ", "аиис куэ", "исуэ",
+                           "интеллектуальная система учет", "автоматизированный сбор",
+                           "удалённый сбор данных", "удаленный сбор данных",
+                           "удалённый съём", "удаленный съем", "телеметрия", "диспетчеризация")
+        if not has_smart_metering and any(k in ctx_lower for k in smart_keywords):
+            has_smart_metering = True
 
         # ── ДЕТЕРМИНИРОВАННЫЕ ПРАВИЛА ПОСТОБРАБОТКИ ─────────────────────────
         # Применяются поверх ответа LLM — они не могут быть «домыслены» моделью.
@@ -761,96 +795,166 @@ JSON:"""
         # Флаг: классификатор определил категорию "Технологии" (GSM, LoRaWAN и т.п.)
         is_tech_category = tender_category == "Технологии"
 
-        # Правило C1: чисто сервисные / поверочные тендеры — всегда "Не подходит"
-        # Исключение: если классификатор дал категорию "Технологии" И есть технологии/АСКУЭ —
-        # тендер на обслуживание системы передачи данных релевантен, снижаем только до "На грани"
-        if only_service or only_design:
-            if is_tech_category and (found_technologies or has_smart_metering):
-                # Смягчённое правило для категории "Технологии": сервисный тендер с технологиями — "На грани"
-                if decision == "Не подходит":
-                    decision = "На грани"
-                    score = max(score, 0.45)
-                score = min(score, 0.62)
-                tag = "обслуживание/поверку" if only_service else "проектирование"
-                reasoning += (
-                    f" [Правило C1-Тех: тендер только на {tag}, но классификатор дал категорию 'Технологии' "
-                    f"и найдены технологии {found_technologies or ['АСКУЭ']} — решение смягчено до 'На грани'.]"
-                )
-            else:
-                decision = "Не подходит"
-                score = min(score, 0.12)
-                if only_service:
-                    reasoning += " [Правило C1: тендер только на обслуживание/поверку без поставки новых ПУ — Не подходит.]"
-                else:
-                    reasoning += " [Правило C1: тендер только на проектирование без поставки/монтажа ПУ — Не подходит.]"
+        # ===== ПОРЯДОК ВАЖЕН: сначала ЖЁСТКИЕ "Не подходит" (правила C),
+        # потом сильные "Подходит" (правила A), потом мягкие "На грани" (B). =====
 
-        # Правило C2: нет ни поставки ПУ, ни технологий, ни умного учёта
-        elif not has_pu_supply and not found_technologies and not has_smart_metering:
+        applied_rule = None
+
+        # ---------- ПРАВИЛА C: жёсткие "Не подходит" ----------
+
+        # C-OutLight: освещение помещений (внутреннее) — никогда не наш кейс
+        if direction == "Освещение" and not is_outdoor_lighting:
             decision = "Не подходит"
             score = min(score, 0.12)
-            reasoning += " [Правило C2: в документации нет ни поставки ПУ, ни технологий передачи данных, ни АСКУЭ — Не подходит.]"
+            reasoning += " [Правило C-OutLight: освещение помещений (не уличное/наружное/архитектурное) — Не подходит.]"
+            applied_rule = "C-OutLight"
 
-        # Правило A-Тех: категория "Технологии" + Электроэнергия + технологии + АСКУЭ → "Подходит"
-        # (применяется независимо от has_pu_supply, т.к. сервис/поверка систем передачи данных — наш профиль)
+        # C-WaterSimple: простой счётчик воды без интерфейсов и без АСКУЭ — не берём
+        elif direction == "Вода" and not found_technologies and not has_smart_metering and not is_tech_category:
+            decision = "Не подходит"
+            score = min(score, 0.15)
+            reasoning += " [Правило C-WaterSimple: счётчик воды без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
+            applied_rule = "C-WaterSimple"
+
+        # C-HeatGasSimple: простой счётчик тепла/газа без интерфейсов — не берём
+        elif direction in ("Тепло", "Газ") and not found_technologies and not has_smart_metering:
+            decision = "Не подходит"
+            score = min(score, 0.15)
+            reasoning += f" [Правило C-HeatGasSimple: {direction} без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
+            applied_rule = "C-HeatGasSimple"
+
+        # C-ServiceOnly: только сервис/поверка/проектирование, нет триггеров работ по учёту
+        elif (only_service or only_design) and not has_works_pu_trigger and not is_tech_category:
+            decision = "Не подходит"
+            score = min(score, 0.12)
+            tag = "обслуживание/поверку" if only_service else "проектирование"
+            reasoning += f" [Правило C-ServiceOnly: тендер только на {tag} без поставки/замены ПУ и без триггеров 522-ФЗ/АИИСКУЭ — Не подходит.]"
+            applied_rule = "C-ServiceOnly"
+
+        # C-Empty: нет ничего профильного
         elif (
-            is_tech_category
-            and direction == "Электроэнергия"
-            and found_technologies
-            and has_smart_metering
+            not has_pu_supply
+            and not found_technologies
+            and not has_smart_metering
+            and not has_works_pu_trigger
+            and direction not in ("Электроэнергия", "Высоковольтные ПУ")
+            and not (direction == "Освещение" and is_outdoor_lighting)
+        ):
+            decision = "Не подходит"
+            score = min(score, 0.12)
+            reasoning += " [Правило C-Empty: ни поставки ПУ, ни технологий, ни АСКУЭ, ни триггеров работ по учёту — Не подходит.]"
+            applied_rule = "C-Empty"
+
+        # ---------- ПРАВИЛА A: сильные "Подходит" ----------
+
+        # A-TechCategory: классификатор отнёс к "Технологии" — это наш ядерный профиль (100% pickup в эталоне)
+        elif is_tech_category:
+            decision = "Подходит"
+            score = max(score, 0.85)
+            reasoning += " [Правило A-TechCategory: классификатор дал категорию 'Технологии' — наш ядерный профиль (100% pickup в эталонной разметке людей).]"
+            applied_rule = "A-TechCategory"
+
+        # A-LoRaWAN: явное LoRaWAN — высший приоритет компании
+        elif any("lorawan" in t.lower() for t in found_technologies):
+            decision = "Подходит"
+            score = max(score, 0.90)
+            reasoning += " [Правило A-LoRaWAN: явное упоминание LoRaWAN — высший приоритет.]"
+            applied_rule = "A-LoRaWAN"
+
+        # A-WorksPU: работы по 522-ФЗ / АИИСКУЭ / ИСУЭ / системам учёта э/э
+        elif tender_category == "Работы" and has_works_pu_trigger:
+            decision = "Подходит"
+            score = max(score, 0.80)
+            reasoning += " [Правило A-WorksPU: категория 'Работы' + триггер 522-ФЗ/АИИСКУЭ/ИСУЭ/АСКУЭ — Подходит.]"
+            applied_rule = "A-WorksPU"
+
+        # A-OutLight+: уличное освещение + конкретные светильники/опоры/бренды
+        elif (
+            tender_category == "Освещение" and is_outdoor_lighting
+            and any(k in ctx_lower for k in ("светильник", "опора освещения", "опор освещения",
+                                              "галад", "кедр", "фрегат", "автомобильн", "автодорог", "сетей наружного"))
+        ):
+            decision = "Подходит"
+            score = max(score, 0.80)
+            reasoning += " [Правило A-OutLight+: уличное/наружное освещение с конкретными светильниками/опорами/брендами — Подходит.]"
+            applied_rule = "A-OutLight+"
+
+        # A-SmartPU: умные ПУ + поставка
+        elif has_smart_metering and has_pu_supply:
+            decision = "Подходит"
+            score = max(score, 0.82)
+            reasoning += " [Правило A-SmartPU: АСКУЭ/умные ПУ + поставка — Подходит.]"
+            applied_rule = "A-SmartPU"
+
+        # A-Elec+Tech: электроэнергия + интерфейсы + поставка ПУ
+        elif (
+            direction == "Электроэнергия" and has_pu_supply
+            and any(t.lower() in ("gsm", "nb-iot", "nb-fi", "plc", "rf", "rs-485", "rs485", "485", "lorawan")
+                    for t in (found_technologies or []))
         ):
             decision = "Подходит"
             score = max(score, 0.82)
-            reasoning += (
-                f" [Правило A-Тех: классификатор дал категорию 'Технологии', направление Электроэнергия, "
-                f"технологии {found_technologies} и АСКУЭ подтверждены — решение 'Подходит'.]"
-            )
+            reasoning += " [Правило A-Elec+Tech: Электроэнергия + интерфейсы + поставка ПУ — Подходит.]"
+            applied_rule = "A-Elec+Tech"
 
-        # Правило B-Тех: категория "Технологии" + есть технологии + АСКУЭ (без поставки ПУ) → "На грани"
-        elif is_tech_category and found_technologies and has_smart_metering:
+        # ---------- ПРАВИЛА B: "На грани" ----------
+
+        # B-OutLight: уличное освещение без явных светильников
+        elif tender_category == "Освещение" and is_outdoor_lighting:
             if decision == "Не подходит":
                 decision = "На грани"
-                score = max(score, 0.48)
+            score = max(score, 0.50)
             score = min(score, 0.65)
-            reasoning += (
-                f" [Правило B-Тех: классификатор дал категорию 'Технологии', найдены технологии {found_technologies} "
-                f"и АСКУЭ — решение повышено до 'На грани'.]"
-            )
+            reasoning += " [Правило B-OutLight: уличное/наружное освещение без явных светильников/брендов — На грани.]"
+            applied_rule = "B-OutLight"
 
-        # Правило B-Тех-слабый: категория "Технологии" + есть технологии (без АСКУЭ) → минимум "На грани"
-        elif is_tech_category and found_technologies and decision == "Не подходит":
-            decision = "На грани"
-            score = max(score, 0.42)
-            score = min(score, 0.55)
-            reasoning += (
-                f" [Правило B-Тех-слабый: классификатор дал категорию 'Технологии' и найдены технологии "
-                f"{found_technologies} — решение повышено до 'На грани'.]"
-            )
+        # B-HV: высоковольтные ПУ
+        elif direction == "Высоковольтные ПУ" and has_pu_supply:
+            if decision == "Не подходит":
+                decision = "На грани"
+            score = max(score, 0.50)
+            score = min(score, 0.68)
+            reasoning += " [Правило B-HV: высоковольтные ПУ + поставка — На грани (нужна оценка по заказчику/заводу).]"
+            applied_rule = "B-HV"
 
-        # Правило C3: Тепло/Газ без поставки ПУ — "Не подходит" (не "На грани")
-        elif direction in ("Тепло", "Газ") and not has_pu_supply:
-            decision = "Не подходит"
-            score = min(score, 0.15)
-            reasoning += f" [Правило C3: направление {direction} без явного требования к поставке ПУ — Не подходит.]"
+        # B-Works-Soft: работы с признаками умного учёта/интерфейсов, но без явных триггеров
+        elif tender_category == "Работы" and (has_smart_metering or found_technologies):
+            if decision == "Не подходит":
+                decision = "На грани"
+            score = max(score, 0.45)
+            score = min(score, 0.60)
+            reasoning += " [Правило B-Works-Soft: работы с признаками умного учёта/интерфейсов, но без явных триггеров 522-ФЗ — На грани.]"
+            applied_rule = "B-Works-Soft"
 
-        # Правило C4: "На грани" без поставки ПУ и без технологий → "Не подходит"
-        elif decision == "На грани" and not has_pu_supply and not found_technologies:
-            decision = "Не подходит"
-            score = min(score, 0.18)
-            reasoning += " [Правило C4: решение 'На грани' без поставки ПУ и без технологий не обосновано — понижено до Не подходит.]"
-
-        # Правило B-страховка: Тепло/Газ с поставкой ПУ — максимум "На грани"
-        elif direction in ("Тепло", "Газ") and decision == "Подходит":
-            decision = "На грани"
+        # B-WaterSmart: вода + интерфейсы или АСКУЭ
+        elif direction == "Вода" and (found_technologies or has_smart_metering):
+            if decision == "Не подходит":
+                decision = "На грани"
+            score = max(score, 0.50)
             score = min(score, 0.62)
-            reasoning += f" [Правило B-страховка: направление {direction} — не выше 'На грани' по политике компании.]"
+            reasoning += " [Правило B-WaterSmart: вода + интерфейсы или АСКУЭ — На грани (аналитика по направлению воды).]"
+            applied_rule = "B-WaterSmart"
 
-        # Страховка: синхронизация score и decision
+        # B-HeatGas-WithTech: тепло/газ с интерфейсами или АСКУЭ → На грани
+        elif direction in ("Тепло", "Газ") and (found_technologies or has_smart_metering):
+            decision = "На грани"
+            score = max(score, 0.45)
+            score = min(score, 0.60)
+            reasoning += f" [Правило B-HeatGas-WithTech: {direction} + интерфейсы или АСКУЭ — На грани (аналитическая сводка).]"
+            applied_rule = "B-HeatGas-WithTech"
+
+        # ---------- Страховки ----------
+        # Если score высокий, а решение «Не подходит» — поднимаем
         if score >= 0.7 and decision == "Не подходит":
             decision = "На грани"
             reasoning += " [Корректировка: score высокий, решение повышено до 'На грани'.]"
-        if score <= 0.25 and decision == "Подходит":
+        # Если score низкий, а решение «Подходит» — снижаем
+        if score <= 0.30 and decision == "Подходит":
             decision = "На грани"
             reasoning += " [Корректировка: score низкий, решение понижено до 'На грани'.]"
+
+        if applied_rule:
+            reasoning += f" [Применённое правило: {applied_rule}.]"
 
         # Обогащаем reasoning структурированным резюме если оно слишком короткое
         if len(reasoning) < 80:
@@ -873,6 +977,9 @@ JSON:"""
             "has_smart_metering": has_smart_metering,
             "only_service": only_service,
             "only_design": only_design,
+            "is_outdoor_lighting": is_outdoor_lighting,
+            "has_works_pu_trigger": has_works_pu_trigger,
+            "applied_rule": applied_rule,
             "key_facts": key_facts,
             "customer": parsed.get("customer"),
         }
