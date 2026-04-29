@@ -4,7 +4,7 @@ import logging
 from config import EXTRACTED_TEXT_FOLDER
 from typing import List, Dict, Set, Any
 import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,36 @@ logger = logging.getLogger(__name__)
 # Список полей, которые должны быть видимы в Excel (остальные скрыты)
 VISIBLE_FIELDS = {
     'number', 'title', 'status', 'start_price', 'end_date',
-    'delivery_place', 'customer', 'publish_date'
+    'delivery_place', 'customer', 'publish_date',
+    'predicted_category', 'is_interesting', 'deep_rag_decision',
+}
+
+# Преднастроенные ширины колонок (символы) — лучше, чем naive max-length.
+# Колонки, не указанные здесь, получают значение по содержимому, но не больше 50.
+EXCEL_COLUMN_WIDTHS = {
+    'number': 14,
+    'title': 60,
+    'status': 16,
+    'start_price': 16,
+    'end_date': 18,
+    'publish_date': 14,
+    'delivery_place': 28,
+    'customer': 36,
+    'positions': 60,
+    'predicted_category': 18,
+    'is_interesting': 12,
+    'interest_score': 12,
+    'interest_reasoning': 50,
+    'deep_rag_decision': 14,
+    'deep_rag_reasoning': 60,
+    'deep_rag_score': 12,
+    'confidence': 12,
+}
+
+# Колонки, в которых имеет смысл переносить текст
+WRAP_TEXT_FIELDS = {
+    'title', 'customer', 'delivery_place', 'positions',
+    'interest_reasoning', 'deep_rag_reasoning', 'reasoning',
 }
 
 
@@ -108,22 +137,36 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
         'deep_rag_decision': 'Deep RAG: Решение',
         'deep_rag_reasoning': 'Deep RAG: Пояснение',
         'is_interesting': 'Интересен?',
+        'interest_score': 'Оценка интереса',
         'interest_reasoning': 'Пояснение интереса',
     }
-    
+
     headers = [header_names.get(key, key.replace('_', ' ').title()) for key in fieldnames]
     ws.append(headers)
 
     # Стиль заголовков
-    header_font = Font(bold=True, color="FFFFFF")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
-    for col_num, cell in enumerate(ws[1], 1):
+    thin_side = Side(border_style="thin", color="D5D8DC")
+    cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = cell_border
+    ws.row_dimensions[1].height = 32
+
+    # Стили для строк
+    alt_fill = PatternFill(start_color="F4F6F7", end_color="F4F6F7", fill_type="solid")
+    interesting_fill = PatternFill(start_color="E8F8F5", end_color="E8F8F5", fill_type="solid")  # светло-зелёный
+    not_interesting_fill = PatternFill(start_color="FDF2E9", end_color="FDF2E9", fill_type="solid")  # светло-оранжевый
+    default_alignment = Alignment(horizontal='left', vertical='top', wrap_text=False)
+    wrap_alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+    center_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
     # Заполнение данных
-    for rec in records:
+    for rec_idx, rec in enumerate(records, start=1):
         row = []
         for key in fieldnames:
             value = rec.get(key, '')
@@ -154,34 +197,66 @@ def generate_excel_table(input_dir: str, output_xlsx_path: str, jsonl_filename: 
             row.append(value)
 
         ws.append(row)
+        excel_row = ws.max_row
+
+        # Подсветка строки по статусу «интересен»
+        is_interesting_flag = rec.get('is_interesting') is True
+        row_fill = interesting_fill if is_interesting_flag else (alt_fill if rec_idx % 2 == 0 else None)
+        # «Не интересные» с явным результатом deep_rag = «Не подходит» подсветим мягким оранжевым
+        deep_decision = str(rec.get('deep_rag_decision', '')).lower()
+        if not is_interesting_flag and 'не подходит' in deep_decision:
+            row_fill = not_interesting_fill
+
+        # Стили для каждой ячейки в строке
+        for col_idx, key in enumerate(fieldnames, start=1):
+            cell = ws.cell(row=excel_row, column=col_idx)
+            cell.border = cell_border
+            if row_fill is not None:
+                cell.fill = row_fill
+            if key in WRAP_TEXT_FIELDS:
+                cell.alignment = wrap_alignment
+            elif key in ('is_interesting', 'predicted_category', 'deep_rag_decision'):
+                cell.alignment = center_alignment
+            else:
+                cell.alignment = default_alignment
 
         # ГИПЕРССЫЛКА НА НОМЕР ТЕНДЕРА
         if 'number' in fieldnames:
             number_col_idx = fieldnames.index('number') + 1
-            cell = ws.cell(row=ws.max_row, column=number_col_idx)
+            cell = ws.cell(row=excel_row, column=number_col_idx)
             url = rec.get('url', '')
             if url:
                 cell.hyperlink = url
                 cell.style = 'Hyperlink'
+                cell.alignment = default_alignment
 
-    # Автоподбор ширины колонок
-    for col in ws.columns:
-        max_length = 0
-        col_letter = get_column_letter(col[0].column)
-        for cell in col:
-            try:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 80)
-        ws.column_dimensions[col_letter].width = adjusted_width
+    # Преднастроенные ширины колонок
+    for col_idx, key in enumerate(fieldnames, start=1):
+        col_letter = get_column_letter(col_idx)
+        if key in EXCEL_COLUMN_WIDTHS:
+            ws.column_dimensions[col_letter].width = EXCEL_COLUMN_WIDTHS[key]
+        else:
+            # fallback: вычисляем по содержимому, но с разумным max
+            max_length = 0
+            for cell in ws[col_letter]:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value).split('\n', 1)[0]))
+                except Exception:
+                    pass
+            ws.column_dimensions[col_letter].width = min(max(max_length + 2, 12), 40)
 
     # Скрыть колонки, не входящие в список VISIBLE_FIELDS
     for col_idx, key in enumerate(fieldnames, start=1):
         col_letter = get_column_letter(col_idx)
         if key not in VISIBLE_FIELDS:
             ws.column_dimensions[col_letter].hidden = True
+
+    # Закрепляем строку с заголовками + первый столбец (номер тендера)
+    ws.freeze_panes = 'B2'
+
+    # Включаем фильтры (стрелки вверху каждой колонки)
+    ws.auto_filter.ref = ws.dimensions
 
     # Сохраняем
     os.makedirs(os.path.dirname(output_xlsx_path) or '.', exist_ok=True)
@@ -385,7 +460,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                     cell_content = f'<a href="{url_escaped}" target="_blank" title="{number_escaped}">{number_escaped}</a>'
                 else:
                     cell_content = number_escaped
-                cells.append(f'<td style="white-space: nowrap;">{cell_content}')
+                cells.append(f'<td class="col-number">{cell_content}')
 
             # ---- НАЗВАНИЕ ТЕНДЕРА (ТЕКСТ) ----
             elif key == 'title':
@@ -398,7 +473,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                           .replace('>', '&gt;')
                                           .replace('"', '&quot;')
                                           .replace("'", '&#39;'))
-                cells.append(f'<td style="min-width: 200px;">{title_escaped}')
+                cells.append(f'<td class="col-title" title="{title_escaped}">{title_escaped}')
 
             # ---- ЗАКАЗЧИК ----
             elif key == 'customer':
@@ -414,7 +489,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                                    .replace('>', '&gt;')
                                                    .replace('"', '&quot;')
                                                    .replace("'", '&#39;'))
-                cells.append(f'<td style="min-width: 150px;">{customer_escaped}')
+                cells.append(f'<td class="col-customer" title="{customer_escaped}">{customer_escaped}')
 
             # ---- МЕСТО ПОСТАВКИ ----
             elif key == 'delivery_place':
@@ -430,7 +505,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                            .replace('>', '&gt;')
                                            .replace('"', '&quot;')
                                            .replace("'", '&#39;'))
-                cells.append(f'<td style="min-width: 150px;">{place_escaped}')
+                cells.append(f'<td class="col-place" title="{place_escaped}">{place_escaped}')
 
             # ---- ПОЗИЦИИ (СПИСОК) ----
             elif key == 'positions':
@@ -473,7 +548,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                     cell_content = str(positions_data)
                 if len(cell_content) > 500:
                     cell_content = cell_content[:500] + '…'
-                cells.append(f'<td style="white-space: pre-wrap; width: 500px;">{cell_content}')
+                cells.append(f'<td class="col-positions">{cell_content}')
 
             # ---- НАЧАЛЬНАЯ ЦЕНА ----
             elif key == 'start_price':
@@ -550,7 +625,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                                     .replace("'", '&#39;'))
                 if not reasoning_escaped:
                     reasoning_escaped = '—'
-                cells.append(f'<td style="white-space: pre-wrap; max-width: 500px;">{reasoning_escaped}')
+                cells.append(f'<td class="col-reasoning" title="{reasoning_escaped}">{reasoning_escaped}')
 
             # ---- ПОЯСНЕНИЕ ИНТЕРЕСА ----
             elif key == 'interest_reasoning':
@@ -565,7 +640,7 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
                                                   .replace("'", '&#39;'))
                 if not reasoning_escaped:
                     reasoning_escaped = '—'
-                cells.append(f'<td style="white-space: pre-wrap; max-width: 400px;">{reasoning_escaped}')
+                cells.append(f'<td class="col-reasoning" title="{reasoning_escaped}">{reasoning_escaped}')
 
             # ---- ВСЕ ОСТАЛЬНЫЕ ПОЛЯ ----
             else:
@@ -614,8 +689,8 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             </div>
             <div>
                 <span style="font-weight: bold;">Колонки:</span>
-                <button id="show-all-columns" class="filter-btn active">Все поля</button>
-                <button id="show-main-columns" class="filter-btn">Основные поля</button>
+                <button id="show-main-columns" class="filter-btn active">Основные поля</button>
+                <button id="show-all-columns" class="filter-btn">Все поля</button>
             </div>
             <button id="reset-filters" class="filter-btn">Сбросить фильтры</button>
             <button id="export-excel" class="filter-btn">📊 Скачать Excel (с фильтрами)</button>
@@ -982,7 +1057,8 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
             showMainColumns();
         }});
 
-        showAllColumns();
+        // По умолчанию открываем отчёт в режиме «Основные поля» — компактный обзор
+        showMainColumns();
         applyFilters();
         updateActiveFiltersDisplay();
     </script>
@@ -1022,42 +1098,81 @@ def _build_html_table(records: List[Dict[str, Any]], fieldnames: List[str]) -> s
         }}
         .table-container {{
             flex: 1;
-            overflow-x: auto;
+            overflow: auto;
             margin: 0 20px 20px 20px;
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             background-color: white;
+            max-height: calc(100vh - 200px);
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
-            font-size: 14px;
-            min-width: 1200px;
+            font-size: 13px;
+            table-layout: auto;
         }}
-        th {{
+        thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 10;
             background-color: #2c3e50;
             color: white;
-            padding: 14px 12px;
+            padding: 8px 6px;
             text-align: left;
             cursor: pointer;
             user-select: none;
             font-weight: 600;
             white-space: nowrap;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
         }}
-        th:hover {{
+        thead th:hover {{
             background-color: #34495e;
         }}
-        th::after {{
-            content: ' ↕️';
+        thead th::after {{
+            content: ' ↕';
             font-size: 0.8em;
-            opacity: 0.7;
-            margin-left: 5px;
+            opacity: 0.6;
+            margin-left: 3px;
         }}
         td {{
-            padding: 12px;
-            border-bottom: 1px solid #e0e0e0;
+            padding: 6px 6px;
+            border-bottom: 1px solid #e8e8e8;
             vertical-align: top;
-            line-height: 1.4;
+            line-height: 1.35;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        /* Компактные ширины колонок: больше информации на 1 экран */
+        td.col-number {{ white-space: nowrap; }}
+        td.col-title {{
+            min-width: 220px;
+            max-width: 360px;
+            white-space: normal;
+            word-break: break-word;
+        }}
+        td.col-customer {{
+            min-width: 130px;
+            max-width: 220px;
+            white-space: normal;
+            word-break: break-word;
+        }}
+        td.col-place {{
+            min-width: 110px;
+            max-width: 180px;
+            white-space: normal;
+            word-break: break-word;
+        }}
+        td.col-positions {{
+            min-width: 200px;
+            max-width: 360px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }}
+        td.col-reasoning {{
+            min-width: 220px;
+            max-width: 380px;
+            white-space: pre-wrap;
+            word-break: break-word;
         }}
         tr:nth-child(even) {{
             background-color: #f9f9f9;

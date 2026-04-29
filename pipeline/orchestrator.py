@@ -46,10 +46,17 @@ from config import (
     RAG_INTEREST_THRESHOLD,
     ANALYSIS_MODEL,
     RAG_MODEL_NAME,
-    FILES_KEYWORDS,
     HEADLESS_MODE,
-    USE_PROXY
+    USE_PROXY,
+    PRICE_THRESHOLD_DEFAULT,
+    CATEGORY_PRICE_THRESHOLDS,
 )
+
+try:
+    from config import FILES_KEYWORDS
+except ImportError:
+    FILES_KEYWORDS = []
+import re as _re
 from table_builder import generate_html_table, generate_excel_table
 from email_agent import fetch_links_from_emails, send_files_via_email
 from file_parser import RostenderSession, ProxyPool
@@ -106,6 +113,75 @@ def _setup_logging(level=logging.INFO, log_file=None):
         handlers=handlers,
         force=True,
     )
+
+
+def _parse_price_to_float(price_value: Any) -> Optional[float]:
+    """Преобразует строковую цену тендера ('1 234 567 ₽', '1234567,00', '—') в float.
+
+    Возвращает None, если цена не указана или непарсится — в этом случае
+    ценовой фильтр НЕ применяется (тендер идёт в анализ).
+    """
+    if price_value is None:
+        return None
+    if isinstance(price_value, (int, float)):
+        try:
+            v = float(price_value)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+    s = str(price_value).strip()
+    if not s or s in ("—", "-", "–", "не указана", "Не указана", "n/a", "N/A"):
+        return None
+    # Убираем все нечисловые символы кроме разделителей
+    digits = _re.sub(r"[^\d,\.]", "", s)
+    if not digits:
+        return None
+    # Если есть и точка и запятая — считаем запятую разделителем тысяч
+    if "," in digits and "." in digits:
+        digits = digits.replace(",", "")
+    else:
+        digits = digits.replace(",", ".")
+    if digits.count(".") > 1:
+        parts = digits.split(".")
+        digits = "".join(parts[:-1]) + "." + parts[-1]
+    try:
+        v = float(digits)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
+def apply_price_filters(records: List[Dict[str, Any]]) -> int:
+    """Применяет ценовой фильтр к интересным тендерам.
+
+    Бизнес-правила:
+      - Освещение: цена < 1 500 000 ₽ → не интересно.
+      - Прочие категории: цена < 500 000 ₽ → не интересно.
+      - Цена не указана → фильтр НЕ применяется (тендер идёт в анализ).
+
+    Возвращает число тендеров, отфильтрованных по цене.
+    """
+    filtered = 0
+    for rec in records:
+        if rec.get("is_interesting") is not True:
+            continue
+        price = _parse_price_to_float(rec.get("start_price"))
+        if price is None:
+            continue
+        category = (rec.get("predicted_category") or "").strip()
+        threshold = CATEGORY_PRICE_THRESHOLDS.get(category, PRICE_THRESHOLD_DEFAULT)
+        if price < threshold:
+            rec["is_interesting"] = False
+            rec["price_filter_applied"] = True
+            note = (
+                f"[Ценовой фильтр: {price:,.0f} ₽ < порога {threshold:,.0f} ₽ "
+                f"для категории «{category or 'без категории'}» — не интересно.]"
+            ).replace(",", " ")
+            rec["interest_reasoning"] = (str(rec.get("interest_reasoning") or "").strip() + " " + note).strip()
+            filtered += 1
+    if filtered:
+        logger.info("Ценовой фильтр снял с интересных %d тендеров", filtered)
+    return filtered
 
 
 def filter_jsonl_by_categories(
@@ -483,6 +559,10 @@ async def run_pipeline(
 
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             all_records = [json.loads(line) for line in f if line.strip()]
+
+        # 5.1 Ценовой фильтр: снимаем с интересных слишком дешёвые тендеры
+        # (Освещение <1.5 млн, остальные <500 тыс). Если цена не указана — пропускаем.
+        apply_price_filters(all_records)
 
         # 6. Выделяем интересные тендеры
         interesting_records = [rec for rec in all_records if rec.get('is_interesting') is True]

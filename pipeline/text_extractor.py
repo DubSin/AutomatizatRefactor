@@ -16,6 +16,47 @@ try:
 except ImportError:
     FILES_KEYWORDS = []
 
+try:
+    from config import HIGH_PRIORITY_KEYWORDS, MEDIUM_PRIORITY_KEYWORDS
+except ImportError:
+    HIGH_PRIORITY_KEYWORDS = []
+    MEDIUM_PRIORITY_KEYWORDS = []
+
+# Ключевые слова, для которых делается полнодокументный sweep — даже если основная
+# постраничная экстракция ограничена MAX_PDF_PAGES / MAX_DOCX_PARAGRAPHS, мы всё равно
+# вытащим контекст вокруг этих терминов со всех страниц/параграфов. Так бот не теряет
+# LoRaWAN, АСКУЭ, RS-485 и пр., если они мелькнули в спецификации на странице 30.
+SWEEP_KEYWORDS = list(dict.fromkeys((HIGH_PRIORITY_KEYWORDS or []) + (MEDIUM_PRIORITY_KEYWORDS or [])))
+
+
+def _extract_keyword_contexts(full_text: str, keywords: List[str], window: int = 250) -> List[str]:
+    """Находит фрагменты вокруг ключевых слов (без учёта регистра).
+
+    Для каждого первого вхождения каждого ключевого слова возвращает строку из
+    ±window символов. Используется как «дополнительный пас» для длинных документов,
+    чтобы критичные термины не терялись при усечении по страницам/параграфам.
+    """
+    if not full_text or not keywords:
+        return []
+    text_lower = full_text.lower()
+    contexts: List[str] = []
+    seen_spans: List[tuple] = []
+    for kw in keywords:
+        if not kw:
+            continue
+        kw_lower = kw.lower()
+        pos = text_lower.find(kw_lower)
+        if pos < 0:
+            continue
+        start = max(0, pos - window)
+        end = min(len(full_text), pos + len(kw) + window)
+        if any(s <= pos <= e for s, e in seen_spans):
+            continue
+        seen_spans.append((start, end))
+        snippet = full_text[start:end].strip()
+        contexts.append(f"**Найдено: «{kw}»**\n\n…{snippet}…")
+    return contexts
+
 logger = logging.getLogger(__name__)
 
 # Поддерживаемые расширения (без архивов)
@@ -213,19 +254,29 @@ def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables
     if ext == '.pdf':
         pages_limit = max_pages if max_pages is not None else MAX_PDF_PAGES
         full_text = ""
+        all_pages_text = ""  # сюда собираем ВСЕ страницы для sweep по ключевым словам
 
         # 1. Извлекаем текст через PyMuPDF
         try:
             doc = fitz.open(file_path)
-            # Если pages_limit задан, ограничиваем число страниц
             total_pages = len(doc)
             pages_to_read = min(total_pages, pages_limit) if pages_limit else total_pages
+
+            # Основной текст (ограниченный MAX_PDF_PAGES)
             for page_num in range(pages_to_read):
                 page = doc[page_num]
-                text = page.get_text("text")  # быстрый метод, без layout
+                text = page.get_text("text")
                 if text.strip():
                     full_text += f"\n\n## Страница {page_num + 1}\n\n"
                     full_text += text + "\n"
+
+            # Полный sweep по всему документу (для ключевых слов LoRaWAN/АСКУЭ/RS-485/...)
+            if SWEEP_KEYWORDS and total_pages > pages_to_read:
+                for page_num in range(total_pages):
+                    page = doc[page_num]
+                    page_text = page.get_text("text")
+                    if page_text.strip():
+                        all_pages_text += f"\n\n[стр.{page_num + 1}]\n{page_text}\n"
             doc.close()
         except Exception as e:
             logger.exception(f"Ошибка при чтении текста из PDF {file_path}: {e}")
@@ -236,6 +287,13 @@ def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables
             if tables_md:
                 full_text += "\n\n## Извлечённые таблицы\n\n"
                 full_text += "\n".join(tables_md)
+
+        # 3. Sweep ключевых слов по всему документу (страницы за пределами лимита)
+        if all_pages_text:
+            contexts = _extract_keyword_contexts(all_pages_text, SWEEP_KEYWORDS)
+            if contexts:
+                full_text += "\n\n## Фрагменты с приоритетными терминами (полный документ)\n\n"
+                full_text += "\n\n".join(contexts)
 
         return clean_text(full_text, preserve_structure=True)
 
@@ -259,9 +317,11 @@ def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables
                 return ""
 
         # Основное извлечение из DOCX
+        all_paragraphs_text = ""  # для sweep по ключевым словам
         try:
             doc = Document(file_path)
             limit = max_pages if max_pages is not None else MAX_DOCX_PARAGRAPHS
+            total_paragraphs = len(doc.paragraphs)
             for p in doc.paragraphs[:limit]:
                 text = p.text.strip()
                 if not text:
@@ -282,6 +342,10 @@ def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables
                     full_text_lines.append(f"{prefix} {text}")
                 else:
                     full_text_lines.append(text)
+
+            # Полный sweep — собираем все параграфы документа для поиска ключевых слов
+            if SWEEP_KEYWORDS and total_paragraphs > limit:
+                all_paragraphs_text = "\n".join(p.text for p in doc.paragraphs if p.text and p.text.strip())
         except Exception as e:
             logger.warning(f"Ошибка при чтении текста из DOCX {file_path}: {e}")
             full_text_lines = []
@@ -293,6 +357,13 @@ def extract_text(file_path: str, max_pages: Optional[int] = None, extract_tables
         if tables_md:
             full_text += "\n\n## Извлечённые таблицы\n\n"
             full_text += "\n".join(tables_md)
+
+        # Sweep ключевых слов по всему документу
+        if all_paragraphs_text:
+            contexts = _extract_keyword_contexts(all_paragraphs_text, SWEEP_KEYWORDS)
+            if contexts:
+                full_text += "\n\n## Фрагменты с приоритетными терминами (полный документ)\n\n"
+                full_text += "\n\n".join(contexts)
 
         return clean_text(full_text, preserve_structure=True)
 
