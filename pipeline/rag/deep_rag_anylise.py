@@ -801,27 +801,61 @@ JSON:"""
         applied_rule = None
 
         # ---------- ПРАВИЛА C: жёсткие "Не подходит" ----------
+        # КАЛИБРОВКА 04.05.2026: жёсткие отказы смягчены до "На грани" для категорий,
+        # которые RAG-классификатор (обученный на разметке человека) присвоил сам.
+        # Если человек обучил систему ставить такую категорию — слепо отбрасывать
+        # её нельзя; пусть тендер дойдёт до ручного просмотра.
 
-        # C-OutLight: освещение помещений (внутреннее) — никогда не наш кейс
+        # Категория от классификатора, которую человек регулярно берёт в работу:
+        # отказы по этим категориям конвертируем в «На грани», а не «Не подходит».
+        human_picks_category = tender_category in (
+            "Вода. Простые ПУ", "Освещение", "Работы",
+            "ЭЭ.Простые ПУ", "ПУ и работы",
+        )
+
+        # C-OutLight: освещение помещений (внутреннее)
+        # Если RAG-классификатор поставил «Освещение» — не отбрасываем жёстко,
+        # переводим в «На грани» (LLM мог ошибиться с признаком is_outdoor_lighting).
         if direction == "Освещение" and not is_outdoor_lighting:
-            decision = "Не подходит"
-            score = min(score, 0.12)
-            reasoning += " [Правило C-OutLight: освещение помещений (не уличное/наружное/архитектурное) — Не подходит.]"
-            applied_rule = "C-OutLight"
+            if tender_category == "Освещение":
+                decision = "На грани"
+                score = max(min(score, 0.45), 0.35)
+                reasoning += " [Правило C-OutLight (мягкое): direction=Освещение без явных уличных маркеров, но классификатор дал категорию 'Освещение' — На грани (требуется ручная проверка).]"
+                applied_rule = "C-OutLight-soft"
+            else:
+                decision = "Не подходит"
+                score = min(score, 0.12)
+                reasoning += " [Правило C-OutLight: освещение помещений (не уличное/наружное/архитектурное) — Не подходит.]"
+                applied_rule = "C-OutLight"
 
-        # C-WaterSimple: простой счётчик воды без интерфейсов и без АСКУЭ — не берём
+        # C-WaterSimple: простой счётчик воды без интерфейсов и без АСКУЭ.
+        # Если категория от классификатора = «Вода. Простые ПУ» И есть поставка ПУ —
+        # это массовая замена счётчиков (человек такие берёт), переводим в «На грани».
         elif direction == "Вода" and not found_technologies and not has_smart_metering and not is_tech_category:
-            decision = "Не подходит"
-            score = min(score, 0.15)
-            reasoning += " [Правило C-WaterSimple: счётчик воды без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
-            applied_rule = "C-WaterSimple"
+            if tender_category == "Вода. Простые ПУ" and has_pu_supply:
+                decision = "На грани"
+                score = max(min(score, 0.55), 0.40)
+                reasoning += " [Правило C-WaterSimple (мягкое): direction=Вода без интерфейсов, но классификатор дал 'Вода. Простые ПУ' и есть поставка ПУ — На грани (массовая замена счётчиков).]"
+                applied_rule = "C-WaterSimple-soft"
+            else:
+                decision = "Не подходит"
+                score = min(score, 0.15)
+                reasoning += " [Правило C-WaterSimple: счётчик воды без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
+                applied_rule = "C-WaterSimple"
 
-        # C-HeatGasSimple: простой счётчик тепла/газа без интерфейсов — не берём
+        # C-HeatGasSimple: простой счётчик тепла/газа без интерфейсов.
+        # Если классификатор дал соответствующую категорию + есть поставка — «На грани».
         elif direction in ("Тепло", "Газ") and not found_technologies and not has_smart_metering:
-            decision = "Не подходит"
-            score = min(score, 0.15)
-            reasoning += f" [Правило C-HeatGasSimple: {direction} без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
-            applied_rule = "C-HeatGasSimple"
+            if tender_category in ("Тепло", "Газ", "тепло", "газ") and has_pu_supply:
+                decision = "На грани"
+                score = max(min(score, 0.50), 0.35)
+                reasoning += f" [Правило C-HeatGasSimple (мягкое): {direction} без интерфейсов, но классификатор дал профильную категорию и есть поставка — На грани.]"
+                applied_rule = "C-HeatGasSimple-soft"
+            else:
+                decision = "Не подходит"
+                score = min(score, 0.15)
+                reasoning += f" [Правило C-HeatGasSimple: {direction} без интерфейсов передачи данных и без АСКУЭ — Не подходит.]"
+                applied_rule = "C-HeatGasSimple"
 
         # C-ServiceOnly: только сервис/поверка/проектирование, нет триггеров работ по учёту
         elif (only_service or only_design) and not has_works_pu_trigger and not is_tech_category:
@@ -831,7 +865,9 @@ JSON:"""
             reasoning += f" [Правило C-ServiceOnly: тендер только на {tag} без поставки/замены ПУ и без триггеров 522-ФЗ/АИИСКУЭ — Не подходит.]"
             applied_rule = "C-ServiceOnly"
 
-        # C-Empty: нет ничего профильного
+        # C-Empty: нет ничего профильного.
+        # Если классификатор поставил человеко-приоритетную категорию — даём шанс
+        # «На грани» (классификатор обучен на людях, ему стоит доверять).
         elif (
             not has_pu_supply
             and not found_technologies
@@ -840,10 +876,16 @@ JSON:"""
             and direction not in ("Электроэнергия", "Высоковольтные ПУ")
             and not (direction == "Освещение" and is_outdoor_lighting)
         ):
-            decision = "Не подходит"
-            score = min(score, 0.12)
-            reasoning += " [Правило C-Empty: ни поставки ПУ, ни технологий, ни АСКУЭ, ни триггеров работ по учёту — Не подходит.]"
-            applied_rule = "C-Empty"
+            if human_picks_category:
+                decision = "На грани"
+                score = max(min(score, 0.45), 0.30)
+                reasoning += f" [Правило C-Empty (мягкое): признаков профильности не извлечено, но классификатор дал '{tender_category}' — На грани (доверяем разметке человека).]"
+                applied_rule = "C-Empty-soft"
+            else:
+                decision = "Не подходит"
+                score = min(score, 0.12)
+                reasoning += " [Правило C-Empty: ни поставки ПУ, ни технологий, ни АСКУЭ, ни триггеров работ по учёту — Не подходит.]"
+                applied_rule = "C-Empty"
 
         # ---------- ПРАВИЛА A: сильные "Подходит" ----------
 
@@ -867,6 +909,14 @@ JSON:"""
             score = max(score, 0.80)
             reasoning += " [Правило A-WorksPU: категория 'Работы' + триггер 522-ФЗ/АИИСКУЭ/ИСУЭ/АСКУЭ — Подходит.]"
             applied_rule = "A-WorksPU"
+
+        # A-WorksSupply: работы + есть поставка ПУ (без явных триггеров 522-ФЗ).
+        # Калибровка 04.05.2026: человек берёт такие работы (#92030079, #92030062).
+        elif tender_category == "Работы" and has_pu_supply:
+            decision = "Подходит"
+            score = max(score, 0.72)
+            reasoning += " [Правило A-WorksSupply: категория 'Работы' + поставка ПУ (типичные монтажные работы по учёту) — Подходит.]"
+            applied_rule = "A-WorksSupply"
 
         # A-OutLight+: уличное освещение + конкретные светильники/опоры/бренды
         elif (
@@ -899,13 +949,14 @@ JSON:"""
 
         # ---------- ПРАВИЛА B: "На грани" ----------
 
-        # B-OutLight: уличное освещение без явных светильников
+        # B-OutLight: уличное освещение без явных светильников.
+        # Калибровка 04.05.2026: человек берёт уличное освещение даже без брендов
+        # (#92030806, #92030220, #92030145). Поднимаем до «Подходит» с умеренным score.
         elif tender_category == "Освещение" and is_outdoor_lighting:
-            if decision == "Не подходит":
-                decision = "На грани"
-            score = max(score, 0.50)
-            score = min(score, 0.65)
-            reasoning += " [Правило B-OutLight: уличное/наружное освещение без явных светильников/брендов — На грани.]"
+            decision = "Подходит"
+            score = max(score, 0.70)
+            score = min(score, 0.80)
+            reasoning += " [Правило B-OutLight (повышено): уличное/наружное освещение — Подходит (человек регулярно берёт такие тендеры даже без явных брендов светильников).]"
             applied_rule = "B-OutLight"
 
         # B-HV: высоковольтные ПУ
@@ -926,14 +977,24 @@ JSON:"""
             reasoning += " [Правило B-Works-Soft: работы с признаками умного учёта/интерфейсов, но без явных триггеров 522-ФЗ — На грани.]"
             applied_rule = "B-Works-Soft"
 
-        # B-WaterSmart: вода + интерфейсы или АСКУЭ
+        # B-WaterSmart: вода + интерфейсы или АСКУЭ — поднимаем до «Подходит»,
+        # т.к. это уже не простой счётчик, а узел учёта с интерфейсом.
         elif direction == "Вода" and (found_technologies or has_smart_metering):
-            if decision == "Не подходит":
-                decision = "На грани"
-            score = max(score, 0.50)
-            score = min(score, 0.62)
-            reasoning += " [Правило B-WaterSmart: вода + интерфейсы или АСКУЭ — На грани (аналитика по направлению воды).]"
+            decision = "Подходит"
+            score = max(score, 0.72)
+            score = min(score, 0.85)
+            reasoning += " [Правило B-WaterSmart (повышено): вода + интерфейсы/АСКУЭ — Подходит.]"
             applied_rule = "B-WaterSmart"
+
+        # B-WaterPU: категория «Вода. Простые ПУ» от классификатора + поставка ПУ.
+        # Это типичные тендеры на массовую замену счётчиков — человек их берёт
+        # (#92031217, #92032120, #92032414, #92032479).
+        elif tender_category == "Вода. Простые ПУ" and has_pu_supply:
+            decision = "На грани"
+            score = max(score, 0.50)
+            score = min(score, 0.65)
+            reasoning += " [Правило B-WaterPU: категория 'Вода. Простые ПУ' + поставка ПУ — На грани (массовая замена счётчиков, человек такие берёт).]"
+            applied_rule = "B-WaterPU"
 
         # B-HeatGas-WithTech: тепло/газ с интерфейсами или АСКУЭ → На грани
         elif direction in ("Тепло", "Газ") and (found_technologies or has_smart_metering):
@@ -948,8 +1009,9 @@ JSON:"""
         if score >= 0.7 and decision == "Не подходит":
             decision = "На грани"
             reasoning += " [Корректировка: score высокий, решение повышено до 'На грани'.]"
-        # Если score низкий, а решение «Подходит» — снижаем
-        if score <= 0.30 and decision == "Подходит":
+        # Если score сильно низкий, а решение «Подходит» — снижаем
+        # (порог снижен с 0.30 до 0.20 — иначе мягкие правила не выживают).
+        if score <= 0.20 and decision == "Подходит":
             decision = "На грани"
             reasoning += " [Корректировка: score низкий, решение понижено до 'На грани'.]"
 
