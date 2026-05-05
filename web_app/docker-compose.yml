@@ -1,0 +1,20 @@
+services:
+  tender-web:
+    build: .
+    image: tender-web:latest
+    container_name: tender-web
+    restart: unless-stopped
+    environment:
+      TENDERS_JSONL_DIR: /data/jsonl
+      PORT: "5000"
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - ${TENDERS_DATA_DIR:-../storage/tenders/jsonl}:/data/jsonl:ro
+    ports:
+      - "${HOST_PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/api/reports',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
