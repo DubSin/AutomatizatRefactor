@@ -10,6 +10,18 @@ body {
     background-color: #f5f5f5;
     color: #2c3e50;
 }
+#root {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.app {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
 header { padding: 16px 20px 4px; }
 header h1 { margin: 0; font-size: 1.5rem; text-align: center; color: #333; }
 
@@ -155,12 +167,12 @@ select, .search-row input[type="text"] {
 /* ----- Таблица ----- */
 .table-container {
     flex: 1;
+    min-height: 200px;
     overflow: auto;
     margin: 16px 20px 0;
     border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     background: white;
-    min-height: 200px;
     position: relative; /* чтобы z-index выпадающего меню работал корректно */
 }
 .loading-msg {
