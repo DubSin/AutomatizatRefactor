@@ -20,6 +20,42 @@ try:
 except ImportError:  # pragma: no cover — на случай старого config.py
     CATEGORY_INTEREST_THRESHOLDS = {}
 
+try:
+    from config import OKPD2_CATEGORY_MAP
+except ImportError:  # pragma: no cover
+    OKPD2_CATEGORY_MAP = {}
+
+# Регексп для поиска ОКПД2-кодов в тексте тендера. Поддерживает форматы
+# «27.33.13.169», «ОКПД2 27.33.13.169», «ОКПД 27.33» и более короткие коды.
+# Структура ОКПД2: XX.XX[.XX[.XXX]] — последний сегмент может быть 1–3 цифры.
+OKPD2_PATTERN = re.compile(r'\b(\d{2}(?:\.\d{1,3}){1,3})\b')
+
+
+def detect_okpd2_match(text: str):
+    """
+    Ищет в тексте ОКПД2-коды и возвращает первый матч из OKPD2_CATEGORY_MAP
+    в виде (code, category, min_score, hint) или None.
+    Сначала пробуем точные коды, затем префиксные совпадения (от длинных к коротким).
+    """
+    if not text or not OKPD2_CATEGORY_MAP:
+        return None
+    found_codes = OKPD2_PATTERN.findall(text)
+    if not found_codes:
+        return None
+    # Ключи справочника по убыванию длины — длинные совпадения важнее
+    keys_sorted = sorted(OKPD2_CATEGORY_MAP.keys(), key=len, reverse=True)
+    for code in found_codes:
+        # Точное совпадение
+        if code in OKPD2_CATEGORY_MAP:
+            cat, score, hint = OKPD2_CATEGORY_MAP[code]
+            return (code, cat, score, hint)
+        # Префиксное совпадение (тендер указал более конкретный код, чем в справочнике)
+        for key in keys_sorted:
+            if code.startswith(key + ".") or code == key:
+                cat, score, hint = OKPD2_CATEGORY_MAP[key]
+                return (code, cat, score, hint)
+    return None
+
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -621,6 +657,10 @@ class TenderClassifierRAG:
 [ВЗЯТЬ] "Высоковольтные счетчики, АСУЭ, договоры техприсоединения" → Технологии, 0.90
 [ВЗЯТЬ] "Замена / массовая установка счётчиков холодной/горячей воды (большое кол-во точек, по адресам)" → Вода. Простые ПУ, 0.55
 [ВЗЯТЬ] "Поставка счётчиков воды Ду15–Ду20 партией от 100 шт. с монтажом" → Вода. Простые ПУ, 0.50
+[ВЗЯТЬ] "ОКПД2 27.33.13.169. Шкафы управления" — это ШУНО (шкаф управления наружным освещением), наш профиль РГ Освещение → Освещение, 0.65
+[ВЗЯТЬ] "Поставка контроллеров / УСПД / концентраторов" даже без LoRaWAN — профильное оборудование ОП Лартех → Работы или Технологии, 0.55–0.65
+[ВЗЯТЬ] "Комплекс работ по модернизации систем освещения и теплоснабжения" — комплексная модернизация → Освещение или Работы, 0.65 (не путать с простой поставкой теплосчётчика)
+[ВЗЯТЬ] "Благоустройство и устройство наружного освещения" — стандартная формулировка уличного освещения → Освещение, 0.65
 
 [НЕ БРАТЬ] "Поставка единичного счётчика воды для одного объекта" без интерфейсов и без партии → Вода. Простые ПУ, interest=0.20
 [НЕ БРАТЬ] "Теплосчетчик / Поставка прибора учёта тепловой энергии" без АСКУЭ/интерфейса (единичная поставка) → Тепло, interest=0.15
@@ -901,6 +941,27 @@ JSON:"""
 
         adjusted_interest = max(0.0, min(1.0, adjusted_interest))
         final_interest_score = adjusted_interest
+
+        # ── ОКПД2-детектор (06.05.2026) ─────────────────────────────────────
+        # Если в тексте тендера явно указан профильный ОКПД2-код, форсируем
+        # минимальный interest_score и предпочитаем профильную категорию.
+        # Покрывает кейсы вроде «ОКПД2 27.33.13.169. Шкафы управления»
+        # (тендер 92069268), где описание отсутствует и LLM ставит «Не профиль».
+        okpd2_match = detect_okpd2_match(tender_text)
+        if okpd2_match:
+            code, okpd2_cat, okpd2_min_score, okpd2_hint = okpd2_match
+            if final_cat == "Не профиль" or final_cat == "Не профиль(ошибка_llm)":
+                final_cat = okpd2_cat
+                final_reason = (
+                    f"ОКПД2 {code} → {okpd2_cat}. {okpd2_hint}. "
+                    f"(исходно LLM/RAG ставил 'Не профиль')"
+                )
+            if final_interest_score < okpd2_min_score:
+                final_interest_score = okpd2_min_score
+                final_interest_reason = (
+                    (final_interest_reason or "")
+                    + f" [ОКПД2 {code}: профильный код, поднят interest_score до {okpd2_min_score:.2f}]"
+                ).strip()
 
         # Применяем покатегорийный порог к итоговому interest_score
         threshold = self._resolve_interest_threshold(final_cat)

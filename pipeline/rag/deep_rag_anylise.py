@@ -51,7 +51,7 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 # Используем те же вспомогательные функции, что и в RAG-классификаторе
-from .rag_classifier import ask_llama_sync, repair_json_fragment
+from .rag_classifier import ask_llama_sync, repair_json_fragment, detect_okpd2_match
 from config import (
     ANALYSIS_MODEL,
     COMPANY_CONTEXT_DIR,
@@ -779,8 +779,13 @@ JSON:"""
         ctx_lower = context.lower() if context else ""
         if not has_works_pu_trigger and WORKS_PU_TRIGGERS:
             has_works_pu_trigger = any(t in ctx_lower for t in WORKS_PU_TRIGGERS)
-        if direction == "Освещение" and not is_outdoor_lighting and OUTDOOR_LIGHTING_TRIGGERS:
-            is_outdoor_lighting = any(t in ctx_lower for t in OUTDOOR_LIGHTING_TRIGGERS)
+        # is_outdoor_lighting проверяем не только при direction == "Освещение",
+        # но и при direction == "Тепло"/"не определено" — кейс 92057513
+        # «Комплекс работ по модернизации систем освещения и теплоснабжения»,
+        # где LLM ставил direction=Тепло из-за «теплоснабжения» и терял освещение.
+        if not is_outdoor_lighting and OUTDOOR_LIGHTING_TRIGGERS:
+            if direction == "Освещение" or tender_category == "Освещение":
+                is_outdoor_lighting = any(t in ctx_lower for t in OUTDOOR_LIGHTING_TRIGGERS)
         # АСКУЭ/АИИСКУЭ/ИСУЭ — частые слова, насильно проставим has_smart_metering
         smart_keywords = ("аскуэ", "асуэ", "аиискуэ", "аиис куэ", "исуэ",
                            "интеллектуальная система учет", "автоматизированный сбор",
@@ -794,6 +799,22 @@ JSON:"""
 
         # Флаг: классификатор определил категорию "Технологии" (GSM, LoRaWAN и т.п.)
         is_tech_category = tender_category == "Технологии"
+
+        # ── ОКПД2-детектор по тексту документации (06.05.2026) ──────────────
+        # Если в чанках документации найден профильный ОКПД2-код, это сильный
+        # положительный сигнал. Используется в правиле A-OKPD2 ниже.
+        # Сначала пробуем сырой текст контекста, затем key_facts от LLM.
+        okpd2_match = None
+        try:
+            okpd2_match = detect_okpd2_match(context or "")
+            if not okpd2_match and key_facts:
+                okpd2_match = detect_okpd2_match(" ".join(str(k) for k in key_facts))
+        except Exception:
+            okpd2_match = None
+        okpd2_code = okpd2_match[0] if okpd2_match else None
+        okpd2_cat = okpd2_match[1] if okpd2_match else None
+        okpd2_min_score = okpd2_match[2] if okpd2_match else 0.0
+        okpd2_hint = okpd2_match[3] if okpd2_match else ""
 
         # ===== ПОРЯДОК ВАЖЕН: сначала ЖЁСТКИЕ "Не подходит" (правила C),
         # потом сильные "Подходит" (правила A), потом мягкие "На грани" (B). =====
@@ -813,10 +834,28 @@ JSON:"""
             "ЭЭ.Простые ПУ", "ПУ и работы",
         )
 
+        # A-LightingComplex (06.05.2026): tender_category = «Освещение»
+        # И direction LLM ушёл в смежное (Тепло/Электроэнергия/не определено),
+        # но в тексте есть уличные маркеры. Кейс 92057513 «Комплекс работ по
+        # модернизации систем освещения и теплоснабжения». Переводим в «Подходит».
+        if (
+            tender_category == "Освещение"
+            and direction != "Освещение"
+            and is_outdoor_lighting
+        ):
+            decision = "Подходит"
+            score = max(score, 0.70)
+            score = min(score, 0.82)
+            reasoning += (
+                " [Правило A-LightingComplex (06.05.2026): классификатор дал категорию 'Освещение', "
+                f"в тексте найдены маркеры уличного освещения, хотя LLM поставил direction='{direction}' "
+                "(вероятно, комплексный тендер с несколькими направлениями). Подходит.]"
+            )
+            applied_rule = "A-LightingComplex"
         # C-OutLight: освещение помещений (внутреннее)
         # Если RAG-классификатор поставил «Освещение» — не отбрасываем жёстко,
         # переводим в «На грани» (LLM мог ошибиться с признаком is_outdoor_lighting).
-        if direction == "Освещение" and not is_outdoor_lighting:
+        elif direction == "Освещение" and not is_outdoor_lighting:
             if tender_category == "Освещение":
                 decision = "На грани"
                 score = max(min(score, 0.45), 0.35)
@@ -909,6 +948,68 @@ JSON:"""
             score = max(score, 0.80)
             reasoning += " [Правило A-WorksPU: категория 'Работы' + триггер 522-ФЗ/АИИСКУЭ/ИСУЭ/АСКУЭ — Подходит.]"
             applied_rule = "A-WorksPU"
+
+        # A-Controllers (06.05.2026): поставка контроллеров/УСПД/концентраторов/ШУНО.
+        # Кейс 92071060 «Поставка контроллеров для филиала» — профильное оборудование
+        # ОП Лартех, даже если LoRaWAN не упомянут. Срабатывает по сырому тексту.
+        elif any(k in ctx_lower for k in (
+            "контроллер", "успд", "концентратор",
+            "шкаф управления", "шкафы управления", "шкафов управления",
+            "шуно", "шу-но",
+        )):
+            if tender_category in ("Технологии", "Работы", "Освещение") or has_pu_supply:
+                decision = "Подходит"
+                score = max(score, 0.72)
+                score = min(score, 0.85)
+                reasoning += (
+                    " [Правило A-Controllers (06.05.2026): обнаружено профильное оборудование "
+                    "(контроллер/УСПД/концентратор/ШУНО) — Подходит, наш профиль ОП Лартех/РГ Освещение.]"
+                )
+                applied_rule = "A-Controllers"
+            else:
+                decision = "На грани"
+                score = max(score, 0.50)
+                score = min(score, 0.65)
+                reasoning += (
+                    " [Правило A-Controllers (мягкое): найдены контроллеры/УСПД/ШУНО, "
+                    "но категория не профильная — На грани, требуется ручная проверка.]"
+                )
+                applied_rule = "A-Controllers-soft"
+
+        # A-OKPD2 (06.05.2026): в тексте документации найден профильный ОКПД2-код.
+        # Это сильный детерминированный сигнал — в карточке закупки явно указан
+        # код продукции/работ, который мы продаём/делаем. Кейс 92069268
+        # «ОКПД2 27.33.13.169. Шкафы управления» — без описания, только код.
+        elif okpd2_match is not None:
+            # Если ОКПД2 совпал с категорией классификатора или с профильным
+            # направлением — Подходит. Иначе — На грани.
+            okpd2_cat_norm = (okpd2_cat or "").lower()
+            tcat_norm = (tender_category or "").lower()
+            profile_match = (
+                okpd2_cat_norm == tcat_norm
+                or (okpd2_cat_norm == "технологии" and is_tech_category)
+                or (okpd2_cat_norm == "освещение" and tcat_norm == "освещение")
+                or (okpd2_cat_norm == "работы" and tcat_norm == "работы")
+            )
+            if profile_match:
+                decision = "Подходит"
+                score = max(score, max(okpd2_min_score, 0.72))
+                score = min(score, 0.88)
+                reasoning += (
+                    f" [Правило A-OKPD2: в документации найден профильный код ОКПД2 {okpd2_code} "
+                    f"({okpd2_hint}). Совпадает с категорией классификатора '{tender_category}' — Подходит.]"
+                )
+                applied_rule = "A-OKPD2"
+            else:
+                decision = "На грани"
+                score = max(score, max(okpd2_min_score, 0.50))
+                score = min(score, 0.65)
+                reasoning += (
+                    f" [Правило A-OKPD2 (мягкое): ОКПД2 {okpd2_code} ({okpd2_hint}) указывает "
+                    f"на профильную категорию '{okpd2_cat}', но классификатор поставил '{tender_category}'. "
+                    "На грани — нужна ручная проверка.]"
+                )
+                applied_rule = "A-OKPD2-soft"
 
         # A-WorksSupply: работы + есть поставка ПУ (без явных триггеров 522-ФЗ).
         # Калибровка 04.05.2026: человек берёт такие работы (#92030079, #92030062).
